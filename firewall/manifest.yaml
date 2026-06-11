@@ -1,0 +1,140 @@
+# firewall/manifest.yaml
+# Authoritative access control manifest — Part 5 of agent-contracts_v5.
+#
+# Every artifact type and every project state document must be listed here.
+# The assembler reads this; it never makes a judgment call.
+# An omission is a correctness gap (logic errors) and a security gap (information barrier violations).
+#
+# allowed_consumers: agents that MAY receive this artifact
+# forbidden_consumers: agents explicitly denied — checked first, takes priority over allowed
+# If forbidden_consumers is empty, only agents in allowed_consumers may read.
+# If allowed_consumers is empty, all agents not in forbidden_consumers may read.
+
+artifacts:
+
+  requirements_doc:
+    allowed_consumers:
+      - architecture_designer
+      - coder
+      - code_reviewer
+      - security_reviewer
+      - test_designer
+      - test_analyst
+    forbidden_consumers: []
+
+  architecture_doc:
+    allowed_consumers:
+      - coder
+      - code_reviewer
+    forbidden_consumers:
+      - security_reviewer   # works from code + tech_stack only
+      - test_designer       # receives interface_manifest projection instead
+
+  interface_manifest:
+    # Orchestrator projection: InterfaceSpec[] from architecture_doc + DataContract[] from requirements_doc
+    # No module rationale, no implementation detail — anti-cheat by design
+    allowed_consumers:
+      - test_designer
+    forbidden_consumers:
+      - coder
+      - code_reviewer
+      - security_reviewer
+
+  code_artifact:
+    allowed_consumers:
+      - code_reviewer
+      - security_reviewer
+      - test_runner
+    forbidden_consumers:
+      - test_designer   # PRIMARY ANTI-CHEAT CONTROL — must never be relaxed
+      - test_analyst    # fail_ambiguous → human escalation; no code access exception exists
+
+  review_report:
+    # Raw report never forwarded to any agent — orchestrator extracts findings projection only
+    allowed_consumers:
+      - orchestrator
+    forbidden_consumers:
+      - coder
+      - test_designer
+      - test_analyst
+      - security_reviewer
+
+  security_report:
+    # Raw report never forwarded to any agent — orchestrator extracts findings projection only
+    allowed_consumers:
+      - orchestrator
+    forbidden_consumers:
+      - coder
+      - test_designer
+      - test_analyst
+      - code_reviewer
+
+  test_suite:
+    allowed_consumers:
+      - test_runner
+      - test_analyst
+      - commit_writer   # commits test files to source repo alongside source code
+    forbidden_consumers:
+      - coder
+      - code_reviewer
+      - security_reviewer
+
+  test_results:
+    allowed_consumers:
+      - test_analyst
+    forbidden_consumers:
+      - coder
+      - code_reviewer
+      - security_reviewer
+      - test_designer
+
+  test_analysis:
+    # Findings passed via whitelist-projected retry_context only — never raw
+    allowed_consumers:
+      - orchestrator
+    forbidden_consumers:
+      - coder
+      - test_designer
+
+# Project state document access
+# Each name is a logical document (.json / .md pair).
+# allowed_readers: agents that receive this document's markdown in their context package.
+# The orchestrator reads pending_writes first, falling back to disk.
+
+project_state_access:
+
+  architecture:
+    allowed_readers:
+      - requirements_analyst
+      - architecture_designer
+      - coder
+      - code_reviewer
+
+  tech_stack:
+    allowed_readers:
+      - requirements_analyst
+      - architecture_designer
+      - coder
+      - security_reviewer
+
+  feature_registry:
+    allowed_readers:
+      - requirements_analyst
+      - architecture_designer
+      - coder
+      - test_designer
+
+  decisions_log:
+    allowed_readers:
+      - requirements_analyst
+      - architecture_designer
+      - code_reviewer
+
+  assumptions_log:
+    allowed_readers:
+      - requirements_analyst
+
+  test_coverage_map:
+    allowed_readers:
+      - test_designer
+      - test_analyst
