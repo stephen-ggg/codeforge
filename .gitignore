@@ -19,3 +19,4 @@ run-logs/
 .vscode/
 .idea/
 *.swp
+*.egg-info/
