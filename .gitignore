@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Secrets
+.env
+
+# Pipeline runtime files
+run-logs/
+.pipeline/LOCK
+
+# Editor
+.vscode/
+.idea/
+*.swp
