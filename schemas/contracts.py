@@ -45,7 +45,8 @@ AgentId = Literal[
     "orchestrator",
 ]
 
-# Used in log events only — commit_writer is loggable without joining AgentId
+# Used in log events and access control — includes mechanical components
+# that consume artifacts but are not LLM agents.
 LogActor = Literal[
     "requirements_analyst",
     "architecture_designer",
@@ -56,6 +57,7 @@ LogActor = Literal[
     "test_analyst",
     "orchestrator",
     "commit_writer",
+    "test_runner",              # mechanical; consumes code_artifact and test_suite
 ]
 
 ArtifactType = Literal[
@@ -208,8 +210,9 @@ class ArtifactMeta(BaseModel):
     schema_version: str                     # semver
     created_at: str                         # ISO 8601
     content_hash: str                       # SHA-256 of serialised output field
-    allowed_consumers: list[AgentId]
-    forbidden_consumers: list[AgentId]
+    # LogActor (not AgentId) — test_runner and commit_writer are mechanical consumers
+    allowed_consumers: list[LogActor]
+    forbidden_consumers: list[LogActor]
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +221,7 @@ class ArtifactMeta(BaseModel):
 
 class AccessEvent(BaseModel):
     artifact_id: str
-    requesting_agent: AgentId
+    requesting_agent: LogActor              # LogActor — mechanical components also make access requests
     decision: Literal["allow", "deny"]
     reason_code: str
     assembly_id: str
