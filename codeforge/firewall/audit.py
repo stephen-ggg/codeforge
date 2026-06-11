@@ -7,7 +7,7 @@ Kept separate so the assembler doesn't need to import the full event log.
 
 from __future__ import annotations
 
-from pipeline.schemas.contracts import AccessEvent
+from codeforge.schemas.contracts import AccessEvent
 
 
 class EventLogProtocol:

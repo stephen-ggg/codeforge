@@ -17,7 +17,7 @@ from typing import cast
 
 import yaml
 
-from pipeline.schemas.contracts import ArtifactType, LogActor, ProjectStateDocument
+from codeforge.schemas.contracts import ArtifactType, LogActor, ProjectStateDocument
 
 # Default manifest path — relative to this file
 _DEFAULT_MANIFEST_PATH = Path(__file__).parent / "manifest.yaml"

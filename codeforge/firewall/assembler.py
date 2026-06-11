@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from pipeline.schemas.contracts import (
+from codeforge.schemas.contracts import (
     AccessEvent,
     AgentId,
     AgentOutput,
@@ -27,9 +27,9 @@ from pipeline.schemas.contracts import (
     LogActor,
     ProjectStateDocument,
 )
-from pipeline.store.artifact_store import ArtifactStore
-from pipeline.store.project_state import ProjectStateStore
-from pipeline.firewall.manifest import FirewallManifest
+from codeforge.store.artifact_store import ArtifactStore
+from codeforge.store.project_state import ProjectStateStore
+from codeforge.firewall.manifest import FirewallManifest
 
 
 # ---------------------------------------------------------------------------
