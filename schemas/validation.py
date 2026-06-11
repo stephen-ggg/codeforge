@@ -16,7 +16,7 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
-from pipeline.schemas.contracts import (
+from codeforge.schemas.contracts import (
     AgentId,
     AgentOutput,
     ContractViolationRePrompt,

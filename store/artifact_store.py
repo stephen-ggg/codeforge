@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pipeline.schemas.contracts import (
+from codeforge.schemas.contracts import (
     AgentId,
     AgentOutput,
     ArtifactMeta,
