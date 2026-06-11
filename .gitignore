@@ -20,3 +20,4 @@ run-logs/
 .idea/
 *.swp
 *.egg-info/
+activate.sh
