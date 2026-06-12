@@ -14,14 +14,14 @@ the prompt is hand-maintained twice:
 
 Output: prompts/rendered/<id>.md — the file the runtime actually loads.
 
-Run from the pipeline package root:
+Run from the codeforge package root:
     python -m prompts.build            # render all agents
     python -m prompts.build --check    # fail if rendered output is stale (for CI)
 
 Build-time guarantees (any violation fails the build):
   - every agent in manifest.yaml has a body.md and an example.json
   - every example.json validates against its declared output_schema
-  - manifest thinking config agrees with pipeline.config.yaml
+  - manifest thinking config agrees with codeforge.config.yaml
   - rendered output matches what these sources produce (under --check)
 """
 
@@ -47,7 +47,7 @@ _PKG_ROOT = _THIS.parent                          # .../config
 _MANIFEST = _THIS / "manifest.yaml"
 _AGENTS_DIR = _THIS / "agents"
 _RENDERED_DIR = _THIS / "rendered"
-_PIPELINE_CONFIG = _PKG_ROOT / "pipeline.config.yaml"
+_PIPELINE_CONFIG = _PKG_ROOT / "codeforge.config.yaml"
 
 # Import path to the contracts module. Adjust the one string below if your package
 # name differs; everything else is path-independent.
@@ -217,7 +217,7 @@ def _load_manifest() -> dict[str, Any]:
 
 
 def _load_pipeline_thinking() -> dict[str, dict[str, Any]]:
-    """Extract each agent's thinking block from pipeline.config.yaml for cross-check."""
+    """Extract each agent's thinking block from codeforge.config.yaml for cross-check."""
     if not _PIPELINE_CONFIG.exists():
         return {}
     with _PIPELINE_CONFIG.open(encoding="utf-8") as fh:
@@ -273,14 +273,14 @@ def render_agent(
                 f"  → the schema changed; update the example to match."
             ) from exc
 
-    # Cross-check thinking config between manifest and pipeline.config.yaml.
+    # Cross-check thinking config between manifest and codeforge.config.yaml.
     man_think = spec.get("thinking", {"enabled": False})
     cfg_think = pipeline_thinking.get(agent_id)
     if cfg_think is not None:
         if bool(man_think.get("enabled")) != bool(cfg_think.get("enabled")):
             raise SystemExit(
                 f"[{agent_id}] thinking.enabled disagrees: manifest={man_think.get('enabled')} "
-                f"pipeline.config={cfg_think.get('enabled')}"
+                f"codeforge.config={cfg_think.get('enabled')}"
             )
 
     body_text = body_path.read_text(encoding="utf-8").strip()
@@ -307,7 +307,7 @@ def build(check: bool = False) -> int:
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(
             f"could not import {_CONTRACTS_MODULE}: {exc}\n"
-            f"  → run from the pipeline package root, e.g. `python -m config.prompts.build`"
+            f"  → run from the codeforge package root, e.g. `python -m config.prompts.build`"
         ) from exc
 
     _RENDERED_DIR.mkdir(parents=True, exist_ok=True)
@@ -333,7 +333,7 @@ def build(check: bool = False) -> int:
 
     if check:
         if stale:
-            print("STALE rendered prompts (run `python -m config.prompts.build`): " + ", ".join(stale))
+            print("STALE rendered prompts (run `python -m codeforge.config.prompts.build`): " + ", ".join(stale))
             return 1
         print("all rendered prompts up to date")
     return 0

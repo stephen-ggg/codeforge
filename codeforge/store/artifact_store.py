@@ -1,7 +1,7 @@
 """
 store/artifact_store.py — Filesystem-backed artifact store.
 
-Each pipeline run gets its own directory under run-logs/<run_id>/:
+Each codeforge run gets its own directory under run-logs/<run_id>/:
   artifacts/         — validated agent outputs (AgentOutput + ArtifactMeta), one JSON per artifact
   raw_outputs/       — raw LLM responses before validation, for debugging only
 
@@ -65,7 +65,7 @@ class ArtifactNotFoundError(Exception):
 
 class ArtifactStore:
     """
-    Filesystem-backed store for validated pipeline artifacts.
+    Filesystem-backed store for validated codeforge artifacts.
 
     Args:
         run_dir: The per-run log directory, e.g. Path("my-project/run-logs/<run_id>").
@@ -89,7 +89,7 @@ class ArtifactStore:
         produced_by: AgentId,
         output: AgentOutput[Any],
         run_id: str,
-        pipeline_version: str,
+        codeforge_version: str,
         schema_version: str,
         allowed_consumers: list[LogActor],
         forbidden_consumers: list[LogActor],
@@ -113,7 +113,7 @@ class ArtifactStore:
             artifact_type=artifact_type,
             produced_by=produced_by,
             run_id=run_id,
-            pipeline_version=pipeline_version,
+            codeforge_version=codeforge_version,
             schema_version=schema_version,
             created_at=created_at,
             content_hash=content_hash,

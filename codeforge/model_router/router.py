@@ -1,7 +1,7 @@
 """
 model_router/router.py — LiteLLM-based model router.
 
-THIS IS THE ONLY FILE IN THE PIPELINE THAT IMPORTS LITELLM.
+THIS IS THE ONLY FILE IN CODEFORGE THAT IMPORTS LITELLM.
 Swapping the LLM provider library means editing this file only.
 
 Responsibilities:
@@ -11,7 +11,7 @@ Responsibilities:
     fall back to a <thinking> scratchpad instruction for non-Anthropic models
   - Normalise the response: strip any thinking block, extract the JSON text so the
     orchestrator always receives a clean JSON string regardless of provider
-  - Stamp every call with agent_id, run_id, and pipeline metadata
+  - Stamp every call with agent_id, run_id, and codeforge metadata
   - Capture litellm_call_id as the authoritative cost-attribution identifier
   - On provider error: retry once with fallback_model if configured
   - Return RouterResult — extracted text content, raw thinking (for debug), call id,
@@ -114,8 +114,8 @@ class ModelRouter:
         metadata = {
             "agent_id": agent_id,
             "run_id": run_id,
-            "pipeline": self._config.pipeline,
-            "pipeline_version": self._config.pipeline,
+            "name": self._config.name,
+            "codeforge_version": self._config.name,
         }
 
         thinking_cfg = getattr(agent_config, "thinking", None)

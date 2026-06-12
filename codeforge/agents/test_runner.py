@@ -1,5 +1,5 @@
 """
-agents/test_runner.py — Mechanical test execution agent.
+agents/test_runner.py — Mechanical codeforge test execution agent.
 
 Runs the test suite in a Docker sandbox. No LLM involved.
 

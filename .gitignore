@@ -11,6 +11,10 @@ __pycache__/
 # Secrets
 .env
 
+# Markdown
+project-context*.md
+agent-contracts*.md
+
 # Pipeline runtime files
 run-logs/
 .pipeline/LOCK

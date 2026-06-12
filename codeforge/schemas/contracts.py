@@ -1,11 +1,11 @@
 """
-schemas/contracts.py — Runtime source of truth for all pipeline data shapes.
+schemas/contracts.py — Runtime source of truth for all codeforge data shapes.
 
 Translated from the TypeScript interfaces in agent-contracts_v5.md.
 The TypeScript interfaces are the design document; these Pydantic v2 models are the
 implementation. Both must stay in sync — a contract change requires updating both.
 
-This module imports nothing from within the pipeline. It is a leaf node.
+This module imports nothing from within codeforge. It is a leaf node.
 """
 
 from __future__ import annotations
@@ -90,11 +90,11 @@ StateWriteTarget = Literal[
     "assumptions_log",
     "tech_stack",
     "test_coverage_map",
-    "pipeline_repo",
+    "codeforge_repo",
     "source_repo",
 ]
 
-WriteSource = Literal["agent_output", "human_decision", "pipeline_success"]
+WriteSource = Literal["agent_output", "human_decision", "codeforge_success"]
 
 HumanInteractionKind = Literal[
     "clarification_questions",
@@ -158,7 +158,7 @@ HandoffInvocationType = Literal["first", "retry", "reentry", "re_prompt"]
 
 EventType = Literal["handoff", "gate", "routing", "state_write", "human_interaction"]
 
-PipelineStatus = Literal[
+CodeforgeStatus = Literal[
     "running",
     "awaiting_human",
     "succeeded",
@@ -206,7 +206,7 @@ class ArtifactMeta(BaseModel):
     artifact_type: ArtifactType
     produced_by: AgentId
     run_id: str
-    pipeline_version: str
+    codeforge_version: str
     schema_version: str                     # semver
     created_at: str                         # ISO 8601
     content_hash: str                       # SHA-256 of serialised output field
@@ -240,7 +240,7 @@ class RetryCounters(BaseModel):
     architecture_validation: int = 0
     infrastructure: int = 0
     malformed_output: int = 0
-    pipeline_state_commit: int = 0
+    codeforge_state_commit: int = 0
     source_code_commit: int = 0
 
 
@@ -773,7 +773,7 @@ TestAnalystOutput = AgentOutput[TestAnalysis]
 # 2.9 CommitWriter (mechanical — no LLM)
 # ---------------------------------------------------------------------------
 
-CommitWriterTarget = Literal["pipeline_state", "source_code"]
+CommitWriterTarget = Literal["codeforge_state", "source_code"]
 
 
 class CommitFile(BaseModel):
@@ -785,10 +785,10 @@ class CommitFile(BaseModel):
 class CommitWriterInput(BaseModel):
     target: CommitWriterTarget
     run_id: str
-    pipeline_version: str
+    codeforge_version: str
     feature_title: str
     ac_ids: list[str]
-    pipeline_state: dict[str, Any] | None = None
+    codeforge_state: dict[str, Any] | None = None
     source_code: dict[str, Any] | None = None
 
 
@@ -812,12 +812,12 @@ class ArtifactRef(BaseModel):
     schema_version: str
 
 
-class PipelineRun(BaseModel):
+class CodeforgeRun(BaseModel):
     run_id: str
-    pipeline_version: str
+    codeforge_version: str
     run_mode: Literal["new_project", "continuation"]
     started_at: str                         # ISO 8601
-    status: PipelineStatus
+    status: CodeforgeStatus
 
     config_snapshot: dict[str, Any]         # typed at load; stored as dict for flexibility
 
@@ -920,7 +920,7 @@ class CountersSnapshot(BaseModel):
     architecture_validation: int = 0
     infrastructure: int = 0
     malformed_output: int = 0
-    pipeline_state_commit: int = 0
+    codeforge_state_commit: int = 0
     source_code_commit: int = 0
     agent_call_count: int = 0
 
@@ -932,7 +932,7 @@ class OrchestratorEventBase(BaseModel):
     run_id: str
     sequence: int                           # monotonically increasing — authoritative ordering
     timestamp: str                          # ISO 8601 — for correlation; not authoritative
-    pipeline_version: str
+    codeforge_version: str
     counters: CountersSnapshot
 
 

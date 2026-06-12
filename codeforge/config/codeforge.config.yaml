@@ -1,4 +1,4 @@
-pipeline: "dev-pipeline-v1"
+name: "codeforge-v1"
 schema_version: "1.0.0"
 
 retry_limits:
@@ -9,7 +9,7 @@ retry_limits:
   architecture_validation_retries: 2
   infrastructure_retries: 3           # shared: test runner error + test analyst error verdict
   malformed_output_retries: 2         # independent of all loop counters
-  pipeline_state_commit: 3
+  codeforge_state_commit: 3
   source_code_commit: 3
 
 global_ceiling:
@@ -46,7 +46,7 @@ agents:
     system_prompt: "prompts/rendered/requirements_analyst.md"
     metadata:
       agent_id: "requirements_analyst"
-      pipeline: "dev-pipeline-v1"
+      name: "codeforge-v1"
 
   architecture_designer:
     model: "claude-sonnet-4-6"
@@ -58,7 +58,7 @@ agents:
     system_prompt: "prompts/rendered/architecture_designer.md"
     metadata:
       agent_id: "architecture_designer"
-      pipeline: "dev-pipeline-v1"
+      name: "codeforge-v1"
 
   coder:
     model: "claude-opus-4-8"
@@ -67,7 +67,7 @@ agents:
     system_prompt: "prompts/rendered/coder.md"
     metadata:
       agent_id: "coder"
-      pipeline: "dev-pipeline-v1"
+      name: "codeforge-v1"
 
   code_reviewer:
     model: "claude-sonnet-4-6"
@@ -79,7 +79,7 @@ agents:
     system_prompt: "prompts/rendered/code_reviewer.md"
     metadata:
       agent_id: "code_reviewer"
-      pipeline: "dev-pipeline-v1"
+      name: "codeforge-v1"
 
   security_reviewer:
     model: "claude-sonnet-4-6"
@@ -91,7 +91,7 @@ agents:
     system_prompt: "prompts/rendered/security_reviewer.md"
     metadata:
       agent_id: "security_reviewer"
-      pipeline: "dev-pipeline-v1"
+      name: "codeforge-v1"
 
   test_designer:
     model: "claude-sonnet-4-6"
@@ -100,7 +100,7 @@ agents:
     system_prompt: "prompts/rendered/test_designer.md"
     metadata:
       agent_id: "test_designer"
-      pipeline: "dev-pipeline-v1"
+      name: "codeforge-v1"
 
   test_analyst:
     model: "claude-sonnet-4-6"
@@ -112,4 +112,4 @@ agents:
     system_prompt: "prompts/rendered/test_analyst.md"
     metadata:
       agent_id: "test_analyst"
-      pipeline: "dev-pipeline-v1"
+      name: "codeforge-v1"

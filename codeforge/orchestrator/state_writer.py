@@ -2,7 +2,7 @@
 orchestrator/state_writer.py — Phase 6 pending_writes flush.
 
 The ONLY place that triggers disk writes to project-state/.
-Called once on pipeline success — never mid-run.
+Called once on codeforge success — never mid-run.
 
 A failed run leaves project-state/ on disk completely untouched
 because this module is never called on failure paths.
@@ -31,7 +31,7 @@ def flush_pending_writes(
     Returns the list of document names that were written.
     Emits a state_write event for each document.
 
-    This is called exactly once per successful pipeline run, from Phase 6.
+    This is called exactly once per successful codeforge run, from Phase 6.
     Nothing else should call this function.
     """
     changed = pending.get_all_changed()
@@ -50,7 +50,7 @@ def flush_pending_writes(
 
         event_log.emit_state_write(
             document=document_str,  # type: ignore[arg-type]
-            write_source="pipeline_success",
+            write_source="codeforge_success",
             gate_condition="all_phases_passed",
             content_hash_before=before_hash,
             content_hash_after=after_hash,

@@ -1,5 +1,5 @@
 """
-orchestrator/routing.py — Routing table as code.
+orchestrator/routing.py — Codeforge routing table as code.
 
 Each function corresponds to a named row in the spec Part 3 routing table.
 No routing logic lives in the state machine — all verdict-to-action mapping is here.
@@ -518,20 +518,20 @@ def route_p6_state_fail(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P6-state-fail: pipeline state commit fails."""
-    limit = _get_limit(config, "pipeline_state_commit", 3)
-    if _within_budget(counters.pipeline_state_commit, limit):
+    """P6-state-fail: codeforge state commit fails."""
+    limit = _get_limit(config, "codeforge_state_commit", 3)
+    if _within_budget(counters.codeforge_state_commit, limit):
         return RoutingOutcome(
             row_id="P6-state-fail",
             decision="retry_same_agent",
             next_state="commit",
-            counter_deltas={"pipeline_state_commit": 1},
+            counter_deltas={"codeforge_state_commit": 1},
         )
     return RoutingOutcome(
         row_id="P6-state-fail",
         decision="escalate",
         next_state="failed_escalated",
-        counter_deltas={"pipeline_state_commit": 1},
+        counter_deltas={"codeforge_state_commit": 1},
         escalation_reason="commit_failure",
     )
 
@@ -559,7 +559,7 @@ def route_p6_src_fail(
 
 
 def route_p6_success() -> RoutingOutcome:
-    """P6-src-ok: both commits landed — pipeline succeeded."""
+    """P6-src-ok: both commits landed — codeforge run succeeded."""
     return RoutingOutcome(
         row_id="P6-src-ok",
         decision="succeed",

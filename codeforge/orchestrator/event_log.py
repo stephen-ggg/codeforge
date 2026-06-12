@@ -1,5 +1,5 @@
 """
-orchestrator/event_log.py — Append-only orchestrator event log.
+orchestrator/event_log.py — Append-only codeforge orchestrator event log.
 
 Writes one JSON object per line to events.jsonl.
 Sequence numbers are monotonically increasing and are the authoritative ordering.
@@ -18,6 +18,7 @@ from typing import Any
 
 from codeforge.schemas.contracts import (
     AccessEvent,
+    CodeforgeRun,
     CountersSnapshot,
     GateEvent,
     GateRule,
@@ -27,7 +28,6 @@ from codeforge.schemas.contracts import (
     HumanInteractionKind,
     LogActor,
     OrchestratorEventUnion,
-    PipelineRun,
     RePromptContext,
     RoutingDecision,
     RoutingEvent,
@@ -50,18 +50,18 @@ def _uuid() -> str:
 
 class EventLog(EventLogProtocol):
     """
-    Append-only event log for a single pipeline run.
+    Append-only event log for a single codeforge run.
 
     Thread-safe: a lock protects the sequence counter and file writes.
     All five event types are emitted through typed factory methods.
     """
 
-    def __init__(self, run_dir: Path, run_id: str, pipeline_version: str) -> None:
+    def __init__(self, run_dir: Path, run_id: str, codeforge_version: str) -> None:
         self._run_dir = run_dir
         self._run_id = run_id
-        self._pipeline_version = pipeline_version
+        self._codeforge_version = codeforge_version
         self._events_path = run_dir / "events.jsonl"
-        self._run_path = run_dir / "pipeline_run.json"
+        self._run_path = run_dir / "codeforge_run.json"
         self._sequence = 0
         self._lock = threading.Lock()
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -90,9 +90,9 @@ class EventLog(EventLogProtocol):
         with self._lock:
             return self._sequence
 
-    def update_run_snapshot(self, run: PipelineRun) -> None:
+    def update_run_snapshot(self, run: CodeforgeRun) -> None:
         """
-        Overwrite pipeline_run.json with the current PipelineRun snapshot.
+        Overwrite codeforge_run.json with the current CodeforgeRun snapshot.
         Called by the state machine on every state transition.
         """
         with self._lock:
@@ -124,7 +124,7 @@ class EventLog(EventLogProtocol):
             "run_id": self._run_id,
             "sequence": 0,          # stamped in emit()
             "timestamp": _now(),
-            "pipeline_version": self._pipeline_version,
+            "codeforge_version": self._codeforge_version,
             "counters": counters.model_dump(),
         }
 

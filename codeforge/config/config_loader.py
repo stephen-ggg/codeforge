@@ -1,15 +1,15 @@
 """
-config/config_loader.py — Pipeline configuration loader.
+config/config_loader.py — Codeforge configuration loader.
 
 Responsibilities:
-  - Load pipeline/config/pipeline.config.yaml (installation default)
-  - Load <project_dir>/.pipeline/pipeline.config.yaml (project-local)
+  - Load codeforge/config/codeforge.config.yaml (installation default)
+  - Load <project_dir>/.codeforge/codeforge.config.yaml (project-local)
   - Deep merge: project-local wins on any key present in both
   - Validate required fields
   - Read required env vars (fail fast if absent)
   - Return a typed ConfigSnapshot
 
-The resolved snapshot is stamped immutably onto PipelineRun.config_snapshot at run start.
+The resolved snapshot is stamped immutably onto CodeforgeRun.config_snapshot at run start.
 Changing the config mid-run has no effect.
 """
 
@@ -36,7 +36,7 @@ class RetryLimitsConfig(BaseModel):
     architecture_validation_retries: int = 2
     infrastructure_retries: int = 3
     malformed_output_retries: int = 2
-    pipeline_state_commit: int = 3
+    codeforge_state_commit: int = 3
     source_code_commit: int = 3
 
 
@@ -70,7 +70,7 @@ class AgentConfig(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
-class PipelineStateRepoConfig(BaseModel):
+class CodeforgeStateRepoConfig(BaseModel):
     remote: str
     branch: str = "main"
     gitignore: list[str] = Field(default_factory=list)
@@ -80,37 +80,37 @@ class SourceCodeRepoConfig(BaseModel):
     path: str
     remote: str
     default_branch: str = "main"
-    branch_prefix: str = "pipeline/"
+    branch_prefix: str = "codeforge/"
     pr_target: str = "main"
     auto_merge: bool = True
     output_dir: str = "src"
 
 
 class ReposConfig(BaseModel):
-    pipeline_state: PipelineStateRepoConfig
+    codeforge_state: CodeforgeStateRepoConfig
     source_code: SourceCodeRepoConfig
 
 
 class ConfigSnapshot(BaseModel):
     """
-    The immutable config snapshot stamped onto PipelineRun at run start.
-    Mirrors PipelineRun.config_snapshot.
+    The immutable config snapshot stamped onto CodeforgeRun at run start.
+    Mirrors CodeforgeRun.config_snapshot.
     """
-    pipeline: str
+    name: str
     schema_version: str
     retry_limits: RetryLimitsConfig
     global_ceiling: GlobalCeilingConfig
     confidence_thresholds: dict[str, float]
     test_runner: TestRunnerConfig
     agents: dict[str, AgentConfig]
-    repos: ReposConfig | None = None        # None in pipeline default; required in project config
+    repos: ReposConfig | None = None        # None in codeforge default; required in project config
 
     # Resolved at load time from environment
     anthropic_api_key: str = Field(default="", exclude=True)  # never serialised
     github_token: str = Field(default="", exclude=True)       # never serialised
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a serialisable dict suitable for PipelineRun.config_snapshot."""
+        """Return a serialisable dict suitable for CodeforgeRun.config_snapshot."""
         return self.model_dump(exclude={"anthropic_api_key", "github_token"})
 
 
@@ -118,8 +118,8 @@ class ConfigSnapshot(BaseModel):
 # Loader
 # ---------------------------------------------------------------------------
 
-# Path to the pipeline installation's default config, relative to this file
-_DEFAULT_CONFIG_PATH = Path(__file__).parent / "pipeline.config.yaml"
+# Path to the codeforge installation's default config, relative to this file
+_DEFAULT_CONFIG_PATH = Path(__file__).parent / "codeforge.config.yaml"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -153,10 +153,10 @@ def load_config(
     require_env_vars: bool = True,
 ) -> ConfigSnapshot:
     """
-    Load and merge pipeline configuration.
+    Load and merge codeforge configuration.
 
     Args:
-        project_dir: Path to the managed project directory (contains .pipeline/).
+        project_dir: Path to the managed project directory (contains .codeforge/).
         require_sandbox_image: If True, raise ValueError when sandbox_image is not set.
             Defaults False so Stage 1 tests pass without a full deployment environment.
         require_repos: If True, raise ValueError when the repos block is absent.
@@ -170,20 +170,20 @@ def load_config(
     Raises:
         EnvironmentError: Required env var absent (when require_env_vars=True).
         ValueError: Required config field missing or invalid.
-        FileNotFoundError: Default config file not found (pipeline installation error).
+        FileNotFoundError: Default config file not found (codeforge installation error).
     """
     project_dir = Path(project_dir)
 
     # 1. Load installation default
     if not _DEFAULT_CONFIG_PATH.exists():
         raise FileNotFoundError(
-            f"Pipeline default config not found at {_DEFAULT_CONFIG_PATH}. "
-            "Is the pipeline installed correctly?"
+            f"Codeforge default config not found at {_DEFAULT_CONFIG_PATH}. "
+            "Is codeforge installed correctly?"
         )
     default_config = _load_yaml(_DEFAULT_CONFIG_PATH)
 
     # 2. Load project-local config (optional — project may not exist yet during init)
-    project_config_path = project_dir / ".pipeline" / "pipeline.config.yaml"
+    project_config_path = project_dir / ".codeforge" / "codeforge.config.yaml"
     project_config = _load_yaml(project_config_path)
 
     # 3. Deep merge — project-local wins
@@ -199,14 +199,14 @@ def load_config(
     if require_sandbox_image and not snapshot.test_runner.sandbox_image:
         raise ValueError(
             "test_runner.sandbox_image must be set in the project config before running. "
-            "Set it in .pipeline/pipeline.config.yaml."
+            "Set it in .codeforge/codeforge.config.yaml."
         )
 
     # 6. Validate repos block if required
     if require_repos and snapshot.repos is None:
         raise ValueError(
-            "The 'repos' block must be set in .pipeline/pipeline.config.yaml. "
-            "Both pipeline_state.remote and source_code.remote are required."
+            "The 'repos' block must be set in .codeforge/codeforge.config.yaml. "
+            "Both codeforge_state.remote and source_code.remote are required."
         )
 
     # 7. Read required env vars
@@ -223,7 +223,7 @@ def load_config(
         if missing:
             raise EnvironmentError(
                 f"Required environment variable(s) not set: {', '.join(missing)}. "
-                "Export them before running the pipeline."
+                "Export them before running codeforge."
             )
 
         snapshot.anthropic_api_key = anthropic_key
@@ -252,12 +252,12 @@ def _parse_config(raw: dict[str, Any]) -> ConfigSnapshot:
     if "repos" in raw and raw["repos"]:
         raw_repos = raw["repos"]
         repos = ReposConfig(
-            pipeline_state=PipelineStateRepoConfig(**raw_repos.get("pipeline_state", {})),
+            codeforge_state=CodeforgeStateRepoConfig(**raw_repos.get("codeforge_state", {})),
             source_code=SourceCodeRepoConfig(**raw_repos.get("source_code", {})),
         )
 
     return ConfigSnapshot(
-        pipeline=raw.get("pipeline", "dev-pipeline-v1"),
+        name=raw.get("name", "codeforge-v1"),
         schema_version=raw.get("schema_version", "1.0.0"),
         retry_limits=retry_limits,
         global_ceiling=global_ceiling,

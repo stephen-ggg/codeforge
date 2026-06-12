@@ -1,23 +1,23 @@
 """
-agents/commit_writer.py — Mechanical pipeline commit agent.
+agents/commit_writer.py — Mechanical codeforge commit agent.
 
 Two operations, no LLM:
-  commit_pipeline_state — git add + commit + push the project-state/ directory after the
-                          state_writer has already flushed pending_writes to disk.
-  commit_source_code    — write src/, tests/, requirements*.txt to the source code repo,
-                          create a branch, commit, push, open a GitHub PR.
+  commit_codeforge_state — git add + commit + push the project-state/ directory after the
+                           state_writer has already flushed pending_writes to disk.
+  commit_source_code     — write src/, tests/, requirements*.txt to the source code repo,
+                           create a branch, commit, push, open a GitHub PR.
 
 CommitWriter does NOT increment agent_call_count — the orchestrator skips the ceiling
 check for CommitWriter invocations.
 
 Constructor:
     config      — ConfigSnapshot (provides repos config and github_token)
-    project_dir — Path to the managed project directory (the pipeline state git repo root)
+    project_dir — Path to the managed project directory (the codeforge state git repo root)
 
-CommitWriterInput.pipeline_state and .source_code are untyped dicts to avoid a circular
+CommitWriterInput.codeforge_state and .source_code are untyped dicts to avoid a circular
 dependency between contracts and the agent layer. Expected shapes:
 
-  pipeline_state: (ignored — files are already on disk when commit_pipeline_state is called)
+  codeforge_state: (ignored — files are already on disk when commit_codeforge_state is called)
 
   source_code: {
       "code_artifact": { ...CodeArtifact fields... },
@@ -52,9 +52,9 @@ class CommitWriter:
     # Public methods
     # ------------------------------------------------------------------
 
-    def commit_pipeline_state(self, input: CommitWriterInput) -> CommitWriterResult:
+    def commit_codeforge_state(self, input: CommitWriterInput) -> CommitWriterResult:
         """
-        Commit the project-state/ directory to the pipeline state repo and push.
+        Commit the project-state/ directory to the codeforge state repo and push.
 
         Precondition: state_writer.flush_pending_writes() has already written all
         changed JSON + markdown files to disk. This method only does the git work.
@@ -69,35 +69,35 @@ class CommitWriter:
             if not repo.index.diff("HEAD") and not repo.untracked_files:
                 commit_sha = repo.head.commit.hexsha
                 return CommitWriterResult(
-                    target="pipeline_state",
+                    target="codeforge_state",
                     success=True,
                     commit_sha=commit_sha,
                 )
 
             message = (
-                f"chore(pipeline): run {input.run_id} — {input.feature_title}"
+                f"chore(codeforge): run {input.run_id} — {input.feature_title}"
             )
             commit = repo.index.commit(message)
 
             repos_cfg = self._config.repos
-            if repos_cfg and repos_cfg.pipeline_state.remote:
+            if repos_cfg and repos_cfg.codeforge_state.remote:
                 remote = _get_or_add_remote(
                     repo,
-                    repos_cfg.pipeline_state.remote,
-                    "pipeline_state",
+                    repos_cfg.codeforge_state.remote,
+                    "codeforge_state",
                 )
-                branch = repos_cfg.pipeline_state.branch
+                branch = repos_cfg.codeforge_state.branch
                 repo.git.push(remote, f"HEAD:{branch}")
 
             return CommitWriterResult(
-                target="pipeline_state",
+                target="codeforge_state",
                 success=True,
                 commit_sha=commit.hexsha,
             )
 
         except Exception as exc:
             return CommitWriterResult(
-                target="pipeline_state",
+                target="codeforge_state",
                 success=False,
                 error_message=str(exc),
             )
@@ -217,7 +217,7 @@ def _get_or_add_remote(repo: git.Repo, remote_url: str, preferred_name: str) -> 
         repo.create_remote(name, remote_url)
     except git.exc.GitCommandError:
         # Name taken with a different URL — use a unique suffix
-        name = f"{preferred_name}_pipeline"
+        name = f"{preferred_name}_codeforge"
         repo.create_remote(name, remote_url)
     return name
 
@@ -282,15 +282,15 @@ def _extract_github_repo(remote_url: str) -> str:
 def _build_pr_description(input: CommitWriterInput, commit_sha: str) -> str:
     ac_list = "\n".join(f"- `{ac}`" for ac in input.ac_ids) or "_(none specified)_"
     return (
-        f"## Pipeline-generated feature\n\n"
+        f"## Codeforge-generated feature\n\n"
         f"**Feature:** {input.feature_title}\n"
-        f"**Pipeline run:** `{input.run_id}`\n"
-        f"**Pipeline version:** `{input.pipeline_version}`\n"
+        f"**Codeforge run:** `{input.run_id}`\n"
+        f"**Codeforge version:** `{input.codeforge_version}`\n"
         f"**Commit:** `{commit_sha}`\n\n"
         f"### Acceptance criteria addressed\n\n"
         f"{ac_list}\n\n"
         f"---\n\n"
-        f"*Generated by dev-pipeline-v1. "
+        f"*Generated by codeforge-v1. "
         f"Do not edit files under `src/` or `tests/` directly — "
-        f"re-run the pipeline to apply changes.*\n"
+        f"re-run codeforge to apply changes.*\n"
     )

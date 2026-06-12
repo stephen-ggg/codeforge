@@ -91,7 +91,7 @@ class ContextPackage:
 # Assembler
 # ---------------------------------------------------------------------------
 
-# All artifact types the pipeline currently produces.
+# All artifact types codeforge currently produces.
 # The assembler iterates these to check what's available in the artifact store.
 _ALL_ARTIFACT_TYPES: list[ArtifactType] = [
     "requirements_doc",

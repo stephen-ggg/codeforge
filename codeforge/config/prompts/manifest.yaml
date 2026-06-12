@@ -11,7 +11,7 @@
 #   partial            path to the shared partial composed into this prompt
 #   output_schema      class name in schemas/contracts.py used for (a) the generated field
 #                      reference and (b) build-time validation of example.json
-#   thinking           extended-thinking config; mirrors the agent's pipeline.config.yaml block
+#   thinking           extended-thinking config; mirrors the agent's codeforge.config.yaml block
 #                      (build.py asserts these agree so the prompt and the runtime can't diverge)
 #   inputs             ordered list of inputs the agent may receive. build.py renders the
 #                      "## Your inputs" section from this; the tag is the XML element the
