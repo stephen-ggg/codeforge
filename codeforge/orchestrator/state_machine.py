@@ -1008,11 +1008,12 @@ class StateMachine:
     def run_phase6(self) -> None:
         """Flush pending_writes to disk. CommitWriter invocation handled by CLI layer."""
         counters = self._counters_snap()
-        written = flush_pending_writes(
+        flush_pending_writes(
             self.pending,
             self._project_state,
             self.event_log,
             counters,
+            run_id=self.run.run_id,
         )
         self.run.status = "succeeded"
         self.event_log.update_run_snapshot(self.run)

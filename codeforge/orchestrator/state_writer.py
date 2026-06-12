@@ -24,9 +24,13 @@ def flush_pending_writes(
     project_state: ProjectStateStore,
     event_log: EventLog,
     counters: CountersSnapshot,
+    run_id: str = "",
 ) -> list[str]:
     """
     Write all staged documents from pending_writes to disk as JSON + markdown pairs.
+
+    requirements_history is routed to write_requirements_history(run_id, data) because
+    it is a per-run-id file rather than a singleton document.
 
     Returns the list of document names that were written.
     Emits a state_write event for each document.
@@ -38,16 +42,19 @@ def flush_pending_writes(
     written: list[str] = []
 
     for document_str, data in changed.items():
-        # Hash before (current on-disk content, if any)
-        existing = project_state.read(document_str)  # type: ignore[arg-type]
-        before_hash = _hash(existing) if existing else "none"
+        if document_str == "requirements_history":
+            # Per-run-id file — use the dedicated write path.
+            existing_rh = project_state.read_requirements_history(run_id)
+            before_hash = _hash(existing_rh) if existing_rh else "none"
+            project_state.write_requirements_history(run_id, data)
+            after_hash = _hash(data)
+        else:
+            existing = project_state.read(document_str)  # type: ignore[arg-type]
+            before_hash = _hash(existing) if existing else "none"
+            project_state.write(document_str, data)  # type: ignore[arg-type]
+            after_hash = _hash(data)
 
-        # Write JSON + markdown to disk
-        project_state.write(document_str, data)  # type: ignore[arg-type]
-
-        after_hash = _hash(data)
         written.append(document_str)
-
         event_log.emit_state_write(
             document=document_str,  # type: ignore[arg-type]
             write_source="codeforge_success",
