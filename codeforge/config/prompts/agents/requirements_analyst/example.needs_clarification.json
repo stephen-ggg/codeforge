@@ -1,0 +1,28 @@
+{
+  "output": {
+    "status": "needs_clarification",
+    "questions": [
+      {
+        "id": "Q-001",
+        "question": "Should the function accept an empty list, and if so what should it return?",
+        "why_blocking": "The brief does not say. Returning 0 versus raising an error are both defensible and lead to different acceptance criteria and tests.",
+        "options": ["Return 0 for an empty list", "Raise ValueError for an empty list"]
+      },
+      {
+        "id": "Q-002",
+        "question": "Should non-integer elements (e.g. floats, strings) be rejected, coerced, or ignored?",
+        "why_blocking": "Input-type handling determines whether we need a validation path and a corresponding acceptance criterion."
+      }
+    ]
+  },
+  "assumptions_made": [],
+  "confidence": 0.74,
+  "unresolved_flags": [
+    {
+      "id": "FLAG-001",
+      "description": "Empty-input and input-type behaviour are unspecified; proceeding without answers risks building the wrong contract.",
+      "severity": "warn",
+      "suggested_action": "Confirm the two clarifying questions before architecture."
+    }
+  ]
+}

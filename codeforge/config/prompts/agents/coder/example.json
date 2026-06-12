@@ -1,0 +1,40 @@
+{
+  "output": {
+    "files": [
+      {
+        "path": "requirements.txt",
+        "content": "",
+        "language": "text",
+        "change_type": "new",
+        "change_reason": "No third-party runtime dependencies; file required at repo root."
+      },
+      {
+        "path": "src/even_sum.py",
+        "content": "\"\"\"Sum of even integers.\"\"\"\nfrom __future__ import annotations\n\n\ndef sum_even(numbers: list[int]) -> int:\n    \"\"\"Return the sum of the even integers in ``numbers``.\n\n    Args:\n        numbers: A list of integers.\n\n    Returns:\n        The sum of the even integers; 0 if the list is empty or has no evens.\n\n    Raises:\n        TypeError: If ``numbers`` is not a list of integers.\n    \"\"\"\n    if not isinstance(numbers, list):\n        raise TypeError(\"numbers must be a list of integers\")\n    total = 0\n    for value in numbers:\n        if not isinstance(value, int) or isinstance(value, bool):\n            raise TypeError(\"numbers must contain only integers\")\n        if value % 2 == 0:\n            total += value\n    return total\n",
+        "language": "python",
+        "change_type": "new",
+        "change_reason": "Implements AC-001, AC-002, and AC-003."
+      }
+    ],
+    "change_summary": "Add src/even_sum.py implementing sum_even, summing even integers, returning 0 for empty input, and raising TypeError on non-integer input.",
+    "criteria_addressed": ["AC-001", "AC-002", "AC-003"],
+    "interface_changes": [
+      {
+        "interface_name": "sum_even",
+        "change_type": "added",
+        "breaking": false,
+        "description": "New pure function sum_even(numbers: list[int]) -> int at src.even_sum."
+      }
+    ]
+  },
+  "assumptions_made": [
+    {
+      "id": "ASSUME-001",
+      "description": "Booleans are rejected as non-integers even though bool is a subclass of int, since summing True/False is unlikely to be intended.",
+      "impact": "low",
+      "record": true
+    }
+  ],
+  "confidence": 0.92,
+  "unresolved_flags": []
+}
