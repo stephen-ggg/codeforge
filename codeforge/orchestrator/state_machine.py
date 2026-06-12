@@ -358,6 +358,25 @@ class StateMachine:
             schema_version=meta.schema_version,
         )
 
+    def _record_assumptions(self, output: Any, agent_id: str) -> None:
+        """Append recordable assumptions from agent output to assumptions_log."""
+        from codeforge.schemas.contracts import AssumptionEntry
+        entries = [
+            AssumptionEntry(
+                id=a.id,
+                description=a.description,
+                impact=a.impact,
+                record=True,
+                run_id=self.run.run_id,
+                source_agent=agent_id,
+                status="open",
+            ).model_dump()
+            for a in output.assumptions_made
+            if a.record
+        ]
+        if entries:
+            self.pending.merge_append("assumptions_log", entries)
+
     # ------------------------------------------------------------------
     # Phase 1 — Requirements
     # ------------------------------------------------------------------
@@ -457,6 +476,7 @@ class StateMachine:
                 self.pending.set("requirements_history", req_doc_data)
                 ref = self._store_artifact("requirements_doc", "requirements_analyst", output)
                 self.run.artifacts["requirements_doc"] = ref
+                self._record_assumptions(output, "requirements_analyst")
                 outcome = route_p1_confirmed()
                 self._apply_outcome(outcome)
                 return RequirementsDoc(**req_doc_data)
@@ -589,6 +609,7 @@ class StateMachine:
             iface_ref = self._store_artifact("interface_manifest", "orchestrator", iface_output)
             self.run.artifacts["interface_manifest"] = iface_ref
 
+            self._record_assumptions(output, "architecture_designer")
             return arch_doc
 
     # ------------------------------------------------------------------
@@ -681,6 +702,7 @@ class StateMachine:
 
             ref = self._store_artifact("code_artifact", "coder", output)
             self.run.artifacts["code_artifact"] = ref
+            self._record_assumptions(output, "coder")
             return code_artifact
 
     # ------------------------------------------------------------------
@@ -762,6 +784,7 @@ class StateMachine:
             self._apply_outcome(outcome)
             ref = self._store_artifact("review_report", "code_reviewer", output)
             self.run.artifacts["review_report"] = ref
+            self._record_assumptions(output, "code_reviewer")
             return report
 
     # ------------------------------------------------------------------
@@ -841,6 +864,7 @@ class StateMachine:
             self._apply_outcome(outcome)
             ref = self._store_artifact("security_report", "security_reviewer", output)
             self.run.artifacts["security_report"] = ref
+            self._record_assumptions(output, "security_reviewer")
             return report
 
     # ------------------------------------------------------------------
@@ -925,6 +949,7 @@ class StateMachine:
 
             ref = self._store_artifact("test_suite", "test_designer", output)
             self.run.artifacts["test_suite"] = ref
+            self._record_assumptions(output, "test_designer")
 
             # Emit P5D-valid routing event (was previously missing from event log)
             self._apply_outcome(RoutingOutcome(
@@ -999,6 +1024,7 @@ class StateMachine:
 
             ref = self._store_artifact("test_analysis", "test_analyst", output)
             self.run.artifacts["test_analysis"] = ref
+            self._record_assumptions(output, "test_analyst")
             return analysis
 
     # ------------------------------------------------------------------
