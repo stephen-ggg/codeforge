@@ -581,6 +581,17 @@ class StateMachine:
                     ]}
                     self.pending.set("tech_stack", tech_data)
 
+            # Record tech decisions with record=True to decisions_log
+            recordable_decisions = [d for d in arch_doc.tech_decisions if d.record]
+            if recordable_decisions:
+                self.pending.merge_append("decisions_log", [
+                    {"entry_id": str(uuid.uuid4()), "run_id": self.run.run_id,
+                     "entry_type": "agent_decision", "source_agent": "architecture_designer",
+                     "decision": d.decision, "rationale": d.rationale,
+                     "created_at": _now()}
+                    for d in recordable_decisions
+                ])
+
             # Store architecture in pending_writes
             self.pending.set("architecture", {
                 "schema_version": "1.0.0",
