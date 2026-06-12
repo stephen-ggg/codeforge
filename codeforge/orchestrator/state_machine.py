@@ -300,16 +300,6 @@ class StateMachine:
             self._apply_outcome(outcome)
             self._escalate("global_ceiling_exceeded", agent_id)
 
-        # Handoff event (before call)
-        self.event_log.emit_handoff(
-            to_agent=typed_actor,
-            invocation_type=typed_invocation,
-            counters=self._counters_snap(),
-            assembly_id=assembly_id,
-            stripped_fields=stripped_fields,
-            reprompt_reason=reprompt_reason,
-        )
-
         # LLM call
         result = self.router.complete(
             agent_id=typed_agent_id,
@@ -320,12 +310,14 @@ class StateMachine:
 
         self.run.agent_call_count += 1
 
-        # Update handoff event with litellm_call_id (emitted as follow-up)
+        # Single handoff event emitted after the call so litellm_call_id is available.
         self.event_log.emit_handoff(
             to_agent=typed_actor,
             invocation_type=typed_invocation,
             counters=self._counters_snap(),
             assembly_id=assembly_id,
+            stripped_fields=stripped_fields,
+            reprompt_reason=reprompt_reason,
             litellm_call_id=result.litellm_call_id,
         )
 
