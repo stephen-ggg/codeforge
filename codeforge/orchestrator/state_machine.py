@@ -1046,23 +1046,79 @@ class StateMachine:
             prompts[aid] = p.read_text(encoding="utf-8")
         return prompts
 
+    def _load_artifact_output(self, artifact_type: str) -> dict[str, Any] | None:
+        """
+        Load the latest artifact of the given type from the artifact store.
+        Returns the .output dict, or None if not found.
+        """
+        from typing import cast
+        from codeforge.schemas.contracts import ArtifactType as _AT
+        output = self._artifact_store.get_latest(cast(_AT, artifact_type))
+        if output is None:
+            return None
+        return dict(output.output) if isinstance(output.output, dict) else output.output
+
     def execute(
-        self, human_brief: str, human_interface: Any
+        self,
+        human_brief: str,
+        human_interface: Any,
+        initial_state: str = "requirements",
     ) -> "tuple[RequirementsDoc, CodeArtifact, TestSuite]":
-        """Drive phases 1–6. CommitWriter is handled by the CLI caller."""
+        """
+        Drive phases 1–6. CommitWriter is handled by the CLI caller.
+
+        initial_state: one of 'requirements', 'architecture', 'coding',
+        'test_design', 'test_execution'. Use any value other than 'requirements'
+        when resuming a prior run — the required artifacts are loaded from the
+        artifact store for the resumed run.
+        """
         from codeforge.agents.test_runner import InfrastructureError, TestRunner
         from codeforge.schemas.contracts import TestRunnerInput
 
         prompts = self._load_prompts()
-        req_doc = self.run_phase1(human_brief, human_interface, prompts["requirements_analyst"])
 
-        next_state = "architecture"
         spec_gap_context: dict[str, Any] | None = None
         code_fix_context: dict[str, Any] | None = None
+        req_doc: RequirementsDoc | None = None
         arch_doc: ArchitectureDoc | None = None
         code_art: CodeArtifact | None = None
         test_suite: TestSuite | None = None
         runner_results: Any = None
+
+        if initial_state == "requirements":
+            req_doc = self.run_phase1(human_brief, human_interface, prompts["requirements_analyst"])
+            next_state = "architecture"
+        else:
+            # Resuming from a mid-run escalation — load persisted artifacts.
+            req_data = self._load_artifact_output("requirements_doc")
+            if req_data is None:
+                raise RuntimeError("Cannot resume: requirements_doc artifact not found")
+            req_doc = RequirementsDoc(**req_data)
+
+            if initial_state in ("coding", "code_review", "test_design", "test_execution"):
+                arch_data = self._load_artifact_output("architecture_doc")
+                if arch_data is not None:
+                    arch_doc = ArchitectureDoc(**arch_data)
+
+            if initial_state in ("test_execution",):
+                code_data = self._load_artifact_output("code_artifact")
+                if code_data is not None:
+                    code_art = CodeArtifact(**code_data)
+                suite_data = self._load_artifact_output("test_suite")
+                if suite_data is not None:
+                    test_suite = TestSuite(**suite_data)
+
+            # Map reentry_state names to the while-loop state labels
+            _state_map = {
+                "requirements_clarification": "requirements",
+                "architecture": "architecture",
+                "coding": "coding",
+                "code_review": "coding",  # code_review re-enters coding loop
+                "test_design": "test_design",
+                "test_execution": "test_execution",
+                "commit": "done",          # commit is handled by CLI after execute()
+            }
+            next_state = _state_map.get(initial_state, initial_state)
 
         while next_state != "done":
             if next_state == "architecture":

@@ -331,12 +331,28 @@ def resume(
 
         sm.resume_run(codeforge_run)
 
+        # Apply counter resets from the operator's resolution directive (if any)
+        initial_state = "requirements"
+        if unresolved and escalation.resolution and escalation.resolution.reentry_directive:
+            directive = escalation.resolution.reentry_directive
+            initial_state = directive.reentry_state
+            from codeforge.orchestrator.routing import RoutingOutcome as _RO
+            reset_outcome = _RO(
+                row_id="X-resume",
+                decision="retry_same_agent",
+                next_state=initial_state,
+                counter_resets=directive.counter_resets,
+            )
+            sm._apply_outcome(reset_outcome)
+            if directive.reset_global_ceiling:
+                sm.run.agent_call_count = 0
+
         brief = _load_brief(run_log_dir, run_id)
         if brief is None:
             brief = typer.prompt("Brief not found in run logs — please re-enter the brief")
 
-        typer.echo(f"Continuing from last saved state...")
-        req_doc, code_art, test_suite = sm.execute(brief, human)
+        typer.echo(f"Resuming from state: {initial_state}")
+        req_doc, code_art, test_suite = sm.execute(brief, human, initial_state=initial_state)
         typer.echo(f"Codeforge succeeded (run {run_id})")
 
         _do_commit(sm, req_doc, code_art, test_suite, config, project_dir)
