@@ -1116,6 +1116,47 @@ class StateMachine:
                 if verdict == "pass":
                     outcome = route_p5c_pass()
                     self._apply_outcome(outcome)
+
+                    # Write test_coverage_map from analysis.coverage_update
+                    coverage_entries = [
+                        {**entry, "run_id": self.run.run_id}
+                        for entry in analysis.coverage_update
+                    ]
+                    existing_cov = self.pending.get("test_coverage_map") or \
+                        self._project_state.read("test_coverage_map") or \
+                        {"schema_version": "1.0.0", "entries": []}
+                    merged_entries = existing_cov.get("entries", []) + coverage_entries
+                    self.pending.set("test_coverage_map", {
+                        "schema_version": "1.0.0",
+                        "entries": merged_entries,
+                    })
+
+                    # Update feature_registry: set this feature's status to "tested"
+                    existing_reg = self.pending.get("feature_registry") or \
+                        self._project_state.read("feature_registry") or \
+                        {"schema_version": "1.0.0", "features": []}
+                    features = existing_reg.get("features", [])
+                    updated = False
+                    for feat in features:
+                        if feat.get("feature_title") == req_doc.feature_title:
+                            feat["status"] = "tested"
+                            feat["last_modified_run"] = self.run.run_id
+                            updated = True
+                            break
+                    if not updated:
+                        # New feature — create entry
+                        features.append({
+                            "feature_title": req_doc.feature_title,
+                            "introduced_run": self.run.run_id,
+                            "last_modified_run": self.run.run_id,
+                            "status": "tested",
+                            "interfaces": [],
+                        })
+                    self.pending.set("feature_registry", {
+                        **existing_reg,
+                        "features": features,
+                    })
+
                     next_state = "done"
 
                 elif verdict == "fail_code_bug":
