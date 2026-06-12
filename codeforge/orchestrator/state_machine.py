@@ -1072,14 +1072,15 @@ class StateMachine:
                 code_art = self._run_impl_with_reviews(
                     req_doc, arch_doc, prompts, human_interface, code_fix_context
                 )
-                code_fix_context = None
                 next_state = "test_design"
 
             elif next_state == "test_design":
                 assert arch_doc is not None
                 test_suite = self.run_phase5_design(
-                    req_doc, arch_doc, prompts["test_designer"]
+                    req_doc, arch_doc, prompts["test_designer"],
+                    code_fix_context=code_fix_context,
                 )
+                code_fix_context = None  # consumed; clear after test design completes
                 next_state = "test_execution"
 
             elif next_state == "test_execution":
@@ -1220,18 +1221,23 @@ class _ReviewFailed(Exception):
 def _build_code_fix_context(
     analysis: "TestAnalysis", test_suite: "TestSuite"
 ) -> dict[str, Any]:
-    """Build the code_fix_context dict passed back to the coder after a test failure."""
-    failed_ids = [
+    """
+    Build the code_fix_context dict passed back to the coder after a test failure.
+
+    Per CodeFixContext schema: only flagged_criterion_ids. No test content, no summaries.
+    Criterion ids are collected from the TestCase entries for each code_bug failure.
+    """
+    failed_tc_ids = {
         fa.test_case_id
         for fa in analysis.failure_analyses
         if fa.root_cause_hypothesis == "code_bug"
-    ]
-    return {
-        "trigger": "test_fail_code_bug",
-        "test_summary": analysis.summary,
-        "failed_test_case_ids": failed_ids,
-        "failure_analyses": [fa.model_dump() for fa in analysis.failure_analyses],
     }
+    # Map test_case_id → criterion_ids from the test suite
+    tc_map = {tc.id: tc.criterion_ids for tc in test_suite.test_cases}
+    flagged: set[str] = set()
+    for tc_id in failed_tc_ids:
+        flagged.update(tc_map.get(tc_id, []))
+    return {"flagged_criterion_ids": sorted(flagged)}
 
 
 def _build_spec_gap_context(analysis: "TestAnalysis") -> dict[str, Any]:
