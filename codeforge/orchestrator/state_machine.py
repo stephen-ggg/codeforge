@@ -602,12 +602,14 @@ class StateMachine:
         system_prompt: str,
         retry_context: dict[str, Any] | None = None,
         code_fix_context: dict[str, Any] | None = None,
+        entry_stripped_fields: list[str] | None = None,
     ) -> CodeArtifact:
         """Drive Phase 3 (coding) to completion."""
         from codeforge.agents.coder import CoderAgent
         from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
+        first_call = True
 
         while True:
             pkg = self.assembler.assemble("coder", self.run.run_id)
@@ -626,7 +628,11 @@ class StateMachine:
                 "coder", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
                 reprompt_reason=reprompt.reason if reprompt is not None else None,
+                # stripped_fields only applies to the entry invocation (describes what
+                # the orchestrator stripped from the previous phase's review findings)
+                stripped_fields=entry_stripped_fields if first_call else None,
             )
+            first_call = False
 
             gate_result = self.gates.evaluate(
                 raw=raw,
@@ -1164,29 +1170,50 @@ class StateMachine:
     ) -> CodeArtifact:
         """Inner loop: coder → code review → security review. Retries on review failure."""
         retry_context: dict[str, Any] | None = None
+        stripped_fields: list[str] | None = None
+        cfg = self._config.to_dict()
         while True:
             code_art = self.run_phase3(
-                req_doc, arch_doc, prompts["coder"], retry_context, code_fix_context
+                req_doc, arch_doc, prompts["coder"], retry_context, code_fix_context,
+                entry_stripped_fields=stripped_fields,
             )
             code_fix_context = None  # only applies to the first coding attempt
+            stripped_fields = None
 
             try:
                 self.run_phase4a(req_doc, arch_doc, code_art, prompts["code_reviewer"])
             except _ReviewFailed as exc:
+                # Whitelist projection: only description + suggested_fix per finding.
+                projected = [
+                    {"description": f.description, "suggested_fix": f.suggested_fix}
+                    for f in exc.report.findings
+                ]
+                stripped_fields = ["id", "file", "line_range", "category", "severity"]
                 retry_context = {
+                    "retry_number": self.run.retry_counters.code_review_loop,
+                    "max_retries": cfg.get("retry_limits", {}).get("code_review_loop", 3),
                     "trigger": "code_review_fail",
-                    "review_findings": [f.model_dump() for f in exc.report.findings],
-                    "review_summary": exc.report.summary,
+                    "review_findings": projected,
+                    "security_findings": [],
+                    "code_bug_findings": [],
                 }
                 continue
 
             try:
                 self.run_phase4b(req_doc, code_art, prompts["security_reviewer"])
             except _ReviewFailed as exc:
+                projected = [
+                    {"description": f.description, "suggested_fix": f.recommended_fix}
+                    for f in exc.report.findings
+                ]
+                stripped_fields = ["id", "file", "line_range", "category", "severity", "cwe"]
                 retry_context = {
+                    "retry_number": self.run.retry_counters.security_review_loop,
+                    "max_retries": cfg.get("retry_limits", {}).get("security_review_loop", 3),
                     "trigger": "security_review_fail",
-                    "security_findings": [f.model_dump() for f in exc.report.findings],
-                    "security_summary": exc.report.summary,
+                    "review_findings": [],
+                    "security_findings": projected,
+                    "code_bug_findings": [],
                 }
                 continue
 
