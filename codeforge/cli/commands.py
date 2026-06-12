@@ -190,9 +190,9 @@ def init(
     codeforge_dir = project_dir / ".codeforge"
     config_path = codeforge_dir / "codeforge.config.yaml"
 
-    if config_path.exists():
+    if codeforge_dir.exists():
         typer.echo(
-            f"Error: {config_path} already exists. "
+            f"Error: {codeforge_dir} already exists. "
             "Delete it to reinitialise, or edit it directly.",
             err=True,
         )
