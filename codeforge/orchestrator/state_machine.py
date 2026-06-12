@@ -71,6 +71,7 @@ from codeforge.schemas.contracts import (
     EscalationReason,
     HandoffInvocationType,
     LogActor,
+    RePromptContext,
     RequirementsDoc,
     RetryCounters,
     ReviewReport,
@@ -372,29 +373,31 @@ class StateMachine:
         Returns the confirmed RequirementsDoc.
         human_interface: object with ask_clarification(), confirm_requirements() methods.
         """
-        from codeforge.schemas.contracts import (
-            RequirementsNeedsClarification, RequirementsComplete, AgentOutput,
-        )
+        from codeforge.agents.requirements_analyst import RequirementsAnalystAgent
+        from codeforge.schemas.contracts import AgentOutput
 
         clarification_history: list[dict[str, Any]] = []
         confirm_rejection: dict[str, str] | None = None
+        reprompt: RePromptContext | None = None
 
         while True:
             # Assemble context
             pkg = self.assembler.assemble("requirements_analyst", self.run.run_id)
 
-            # Build user turn
-            user_turn = json.dumps({
-                "run_mode": self.run.run_mode,
-                "human_brief": human_brief,
-                "clarification_history": clarification_history,
-                "confirm_rejection": confirm_rejection,
-                "project_state": None,
-            })
+            # Inject orchestrator-managed fields for build_user_turn()
+            pkg.state_documents["_run_mode"] = self.run.run_mode
+            pkg.state_documents["_human_brief"] = human_brief
+            pkg.state_documents["_clarification_history"] = json.dumps(clarification_history)
+            pkg.state_documents["_confirm_rejection"] = json.dumps(confirm_rejection)
+
+            user_turn = RequirementsAnalystAgent(
+                "requirements_analyst", self.router, self._config
+            ).build_user_turn(pkg, reprompt)
 
             raw = self._invoke_agent(
                 "requirements_analyst", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
+                reprompt_reason=reprompt.reason if reprompt is not None else None,
             )
 
             # Validate
@@ -409,6 +412,7 @@ class StateMachine:
             )
 
             if not gate_result.layer1_passed:
+                reprompt = gate_result.malformed_reprompt
                 outcome = route_malformed(
                     self.run.retry_counters, self._config.to_dict(), "requirements_analyst"
                 )
@@ -436,6 +440,7 @@ class StateMachine:
                     "questions": questions,
                     "answers": [a.model_dump() if hasattr(a, 'model_dump') else a for a in answers],
                 })
+                reprompt = None  # fresh round after human input
                 outcome = route_p1_clarify()
                 self._apply_outcome(outcome)
                 continue
@@ -450,6 +455,8 @@ class StateMachine:
             confirmed = human_interface.confirm_requirements(req_doc_data)
             if confirmed:
                 self.pending.set("requirements_history", req_doc_data)
+                ref = self._store_artifact("requirements_doc", "requirements_analyst", output)
+                self.run.artifacts["requirements_doc"] = ref
                 outcome = route_p1_confirmed()
                 self._apply_outcome(outcome)
                 return RequirementsDoc(**req_doc_data)
@@ -459,6 +466,7 @@ class StateMachine:
                     "rejected_doc_ref": "pending",
                     "rejection_feedback": feedback,
                 }
+                reprompt = None  # rejection context is in confirm_rejection field
                 outcome = route_p1_rejected()
                 self._apply_outcome(outcome)
                 continue
@@ -475,22 +483,28 @@ class StateMachine:
         spec_gap_context: dict[str, Any] | None = None,
     ) -> ArchitectureDoc:
         """Drive Phase 2 (architecture design) to completion."""
-        from codeforge.schemas.contracts import AgentOutput
+        from codeforge.agents.architecture_designer import ArchitectureDesignerAgent
+        from codeforge.schemas.contracts import AgentOutput, InterfaceManifest
+
+        reprompt: RePromptContext | None = None
 
         while True:
             pkg = self.assembler.assemble("architecture_designer", self.run.run_id)
-            user_turn = json.dumps({
-                "run_mode": self.run.run_mode,
-                "requirements_doc": requirements_doc.model_dump(),
-                "current_architecture_md": pkg.state_documents.get("architecture"),
-                "tech_stack_md": pkg.state_documents.get("tech_stack"),
-                "feature_registry_md": pkg.state_documents.get("feature_registry"),
-                "spec_gap_context": spec_gap_context,
-            })
+
+            # Inject orchestrator-managed fields for build_user_turn()
+            pkg.state_documents["_run_mode"] = self.run.run_mode
+            pkg.state_documents["_spec_gap_context"] = json.dumps(
+                spec_gap_context if spec_gap_context is not None else None
+            )
+
+            user_turn = ArchitectureDesignerAgent(
+                "architecture_designer", self.router, self._config
+            ).build_user_turn(pkg, reprompt)
 
             raw = self._invoke_agent(
                 "architecture_designer", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
+                reprompt_reason=reprompt.reason if reprompt is not None else None,
             )
 
             gate_result = self.gates.evaluate(
@@ -505,6 +519,7 @@ class StateMachine:
             )
 
             if not gate_result.layer1_passed:
+                reprompt = gate_result.malformed_reprompt
                 outcome = route_malformed(
                     self.run.retry_counters, self._config.to_dict(), "architecture_designer"
                 )
@@ -514,6 +529,7 @@ class StateMachine:
                 continue
 
             if not gate_result.layer2_passed:
+                reprompt = gate_result.violation_reprompt
                 outcome = route_p2_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
@@ -554,9 +570,24 @@ class StateMachine:
                 "data_flow": [f.model_dump() for f in arch_doc.data_flow],
             })
 
-            # Store artifact
+            # Store artifacts
             ref = self._store_artifact("architecture_doc", "architecture_designer", output)
             self.run.artifacts["architecture_doc"] = ref
+
+            # Project interface_manifest from arch_doc + requirements_doc.
+            iface_manifest = InterfaceManifest(
+                interfaces=arch_doc.interfaces,
+                data_contracts=requirements_doc.data_contracts,
+                acceptance_criteria=requirements_doc.acceptance_criteria,
+            )
+            iface_output = AgentOutput(
+                output=iface_manifest,
+                assumptions_made=[],
+                confidence=1.0,
+                unresolved_flags=[],
+            )
+            iface_ref = self._store_artifact("interface_manifest", "orchestrator", iface_output)
+            self.run.artifacts["interface_manifest"] = iface_ref
 
             return arch_doc
 
@@ -573,23 +604,28 @@ class StateMachine:
         code_fix_context: dict[str, Any] | None = None,
     ) -> CodeArtifact:
         """Drive Phase 3 (coding) to completion."""
+        from codeforge.agents.coder import CoderAgent
         from codeforge.schemas.contracts import AgentOutput
+
+        reprompt: RePromptContext | None = None
 
         while True:
             pkg = self.assembler.assemble("coder", self.run.run_id)
-            user_turn = json.dumps({
-                "run_mode": self.run.run_mode,
-                "requirements_doc": requirements_doc.model_dump(),
-                "architecture_doc": architecture_doc.model_dump(),
-                "tech_stack_md": pkg.state_documents.get("tech_stack"),
-                "existing_interfaces": [],
-                "retry_context": retry_context,
-                "code_fix_context": code_fix_context,
-            })
+
+            # Inject orchestrator-managed fields for build_user_turn()
+            pkg.state_documents["_run_mode"] = self.run.run_mode
+            pkg.state_documents["_existing_interfaces"] = json.dumps([])
+            pkg.state_documents["_retry_context"] = json.dumps(retry_context)
+            pkg.state_documents["_code_fix_context"] = json.dumps(code_fix_context)
+
+            user_turn = CoderAgent(
+                "coder", self.router, self._config
+            ).build_user_turn(pkg, reprompt)
 
             raw = self._invoke_agent(
                 "coder", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
+                reprompt_reason=reprompt.reason if reprompt is not None else None,
             )
 
             gate_result = self.gates.evaluate(
@@ -604,6 +640,7 @@ class StateMachine:
             )
 
             if not gate_result.layer1_passed:
+                reprompt = gate_result.malformed_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "coder")
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
@@ -611,6 +648,7 @@ class StateMachine:
                 continue
 
             if not gate_result.layer2_passed:
+                reprompt = gate_result.violation_reprompt
                 violation = gate_result.violation_reprompt
                 if violation and violation.rule == "requirements_txt_present":
                     outcome = route_p3_no_requirements_txt(self.run.retry_counters, self._config.to_dict())
@@ -651,20 +689,22 @@ class StateMachine:
         system_prompt: str,
     ) -> ReviewReport:
         """Drive Loop A (code review) to completion. Returns passing ReviewReport."""
+        from codeforge.agents.code_reviewer import CodeReviewerAgent
         from codeforge.schemas.contracts import AgentOutput
+
+        reprompt: RePromptContext | None = None
 
         while True:
             pkg = self.assembler.assemble("code_reviewer", self.run.run_id)
-            user_turn = json.dumps({
-                "requirements_doc": requirements_doc.model_dump(),
-                "architecture_doc": architecture_doc.model_dump(),
-                "decisions_log_md": pkg.state_documents.get("decisions_log", ""),
-                "code_artifact": code_artifact.model_dump(),
-            })
+
+            user_turn = CodeReviewerAgent(
+                "code_reviewer", self.router, self._config
+            ).build_user_turn(pkg, reprompt)
 
             raw = self._invoke_agent(
                 "code_reviewer", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
+                reprompt_reason=reprompt.reason if reprompt is not None else None,
             )
 
             gate_result = self.gates.evaluate(
@@ -678,6 +718,7 @@ class StateMachine:
             )
 
             if not gate_result.layer1_passed or not gate_result.layer2_passed:
+                reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "code_reviewer")
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
@@ -728,19 +769,22 @@ class StateMachine:
         system_prompt: str,
     ) -> SecurityReport:
         """Drive Loop B (security review) to completion. Returns passing SecurityReport."""
+        from codeforge.agents.security_reviewer import SecurityReviewerAgent
         from codeforge.schemas.contracts import AgentOutput
+
+        reprompt: RePromptContext | None = None
 
         while True:
             pkg = self.assembler.assemble("security_reviewer", self.run.run_id)
-            user_turn = json.dumps({
-                "tech_stack_md": pkg.state_documents.get("tech_stack", ""),
-                "requirements_doc": requirements_doc.model_dump(),
-                "code_artifact": code_artifact.model_dump(),
-            })
+
+            user_turn = SecurityReviewerAgent(
+                "security_reviewer", self.router, self._config
+            ).build_user_turn(pkg, reprompt)
 
             raw = self._invoke_agent(
                 "security_reviewer", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
+                reprompt_reason=reprompt.reason if reprompt is not None else None,
             )
 
             gate_result = self.gates.evaluate(
@@ -754,6 +798,7 @@ class StateMachine:
             )
 
             if not gate_result.layer1_passed or not gate_result.layer2_passed:
+                reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "security_reviewer")
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
@@ -802,31 +847,36 @@ class StateMachine:
         architecture_doc: ArchitectureDoc,
         system_prompt: str,
         code_fix_context: dict[str, Any] | None = None,
+        retry_context: dict[str, Any] | None = None,
     ) -> TestSuite:
         """Drive test design to completion."""
-        from codeforge.schemas.contracts import AgentOutput, InterfaceManifest, DataContract
+        from codeforge.agents.test_designer import TestDesignerAgent
+        from codeforge.schemas.contracts import AgentOutput
+
+        reprompt: RePromptContext | None = None
 
         while True:
+            # Budget check: test_loop must still have remaining budget
+            test_loop_limit = self._config.to_dict().get("retry_limits", {}).get("test_loop", 2)
+            if self.run.retry_counters.test_loop >= test_loop_limit:
+                outcome = route_p5d_covmap_invalid(self.run.retry_counters, self._config.to_dict())
+                self._apply_outcome(outcome)
+                self._escalate(outcome.escalation_reason or "max_retries_exceeded")
+
             pkg = self.assembler.assemble("test_designer", self.run.run_id)
 
-            # Build interface_manifest projection
-            interface_manifest = {
-                "interfaces": [i.model_dump() for i in architecture_doc.interfaces],
-                "data_contracts": [dc.model_dump() for dc in requirements_doc.data_contracts],
-                "acceptance_criteria": [ac.model_dump() for ac in requirements_doc.acceptance_criteria],
-            }
+            # Inject orchestrator-managed fields for build_user_turn()
+            pkg.state_documents["_code_fix_context"] = json.dumps(code_fix_context)
+            pkg.state_documents["_retry_context"] = json.dumps(retry_context)
 
-            user_turn = json.dumps({
-                "requirements_doc": requirements_doc.model_dump(),
-                "interface_manifest": interface_manifest,
-                "test_coverage_map_md": pkg.state_documents.get("test_coverage_map", ""),
-                "feature_registry_md": pkg.state_documents.get("feature_registry", ""),
-                "code_fix_context": code_fix_context,
-            })
+            user_turn = TestDesignerAgent(
+                "test_designer", self.router, self._config
+            ).build_user_turn(pkg, reprompt)
 
             raw = self._invoke_agent(
                 "test_designer", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
+                reprompt_reason=reprompt.reason if reprompt is not None else None,
             )
 
             gate_result = self.gates.evaluate(
@@ -841,6 +891,7 @@ class StateMachine:
             )
 
             if not gate_result.layer1_passed:
+                reprompt = gate_result.malformed_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "test_designer")
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
@@ -848,6 +899,7 @@ class StateMachine:
                 continue
 
             if not gate_result.layer2_passed:
+                reprompt = gate_result.violation_reprompt
                 outcome = route_p5d_covmap_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
@@ -867,6 +919,14 @@ class StateMachine:
 
             ref = self._store_artifact("test_suite", "test_designer", output)
             self.run.artifacts["test_suite"] = ref
+
+            # Emit P5D-valid routing event (was previously missing from event log)
+            self._apply_outcome(RoutingOutcome(
+                row_id="P5D-valid",
+                decision="invoke_agent",
+                next_state="test_execution",
+            ))
+
             return test_suite
 
     # ------------------------------------------------------------------
@@ -881,20 +941,25 @@ class StateMachine:
         system_prompt: str,
     ) -> TestAnalysis:
         """Drive test analysis to completion."""
+        from codeforge.agents.test_analyst import TestAnalystAgent
         from codeforge.schemas.contracts import AgentOutput
+
+        reprompt: RePromptContext | None = None
 
         while True:
             pkg = self.assembler.assemble("test_analyst", self.run.run_id)
-            user_turn = json.dumps({
-                "requirements_doc": requirements_doc.model_dump(),
-                "test_suite": test_suite.model_dump(),
-                "test_runner_results": test_runner_results,
-                "test_coverage_map_md": pkg.state_documents.get("test_coverage_map", ""),
-            })
+
+            # Inject test runner results — not in artifact store, passed directly
+            pkg.state_documents["_test_runner_results"] = json.dumps(test_runner_results)
+
+            user_turn = TestAnalystAgent(
+                "test_analyst", self.router, self._config
+            ).build_user_turn(pkg, reprompt)
 
             raw = self._invoke_agent(
                 "test_analyst", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
+                reprompt_reason=reprompt.reason if reprompt is not None else None,
             )
 
             gate_result = self.gates.evaluate(
@@ -908,6 +973,7 @@ class StateMachine:
             )
 
             if not gate_result.layer1_passed or not gate_result.layer2_passed:
+                reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "test_analyst")
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
