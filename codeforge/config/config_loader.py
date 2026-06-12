@@ -50,12 +50,23 @@ class TestRunnerConfig(BaseModel):
     sandbox_image: str = ""
 
 
+class ThinkingConfig(BaseModel):
+    """Extended-thinking settings for one agent.
+
+    enabled=True is honoured only for Anthropic models (model string starting
+    'claude-'); the router falls back to a <thinking> scratchpad for other providers.
+    """
+    enabled: bool = False
+    budget_tokens: int = 8000
+
+
 class AgentConfig(BaseModel):
     model: str
     temperature: float = 0.2
     max_tokens: int = 4096
     fallback_model: str | None = None
     system_prompt: str = ""
+    thinking: ThinkingConfig = Field(default_factory=ThinkingConfig)
     metadata: dict[str, str] = Field(default_factory=dict)
 
 

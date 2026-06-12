@@ -1,0 +1,117 @@
+# prompts/manifest.yaml
+#
+# Single source of truth for prompt construction. Consumed by:
+#   - build.py            → renders the flat prompt per agent (input section, schema block)
+#   - firewall/assembler  → ContextPackage exposes the tag map so base.py wraps inputs to match
+#
+# Editing tag names here changes BOTH what the prompt tells the agent to look for AND
+# what the assembler emits — they cannot drift apart.
+#
+# Per-agent keys:
+#   partial            path to the shared partial composed into this prompt
+#   output_schema      class name in schemas/contracts.py used for (a) the generated field
+#                      reference and (b) build-time validation of example.json
+#   thinking           extended-thinking config; mirrors the agent's pipeline.config.yaml block
+#                      (build.py asserts these agree so the prompt and the runtime can't diverge)
+#   inputs             ordered list of inputs the agent may receive. build.py renders the
+#                      "## Your inputs" section from this; the tag is the XML element the
+#                      assembler / orchestrator wraps that input in.
+#                        kind: artifact | state_doc | injected | metadata
+#                          artifact  — from ContextPackage.artifacts, firewall-gated
+#                          state_doc — from ContextPackage.state_documents (rendered markdown)
+#                          injected  — orchestrator-constructed (reprompt, retry contexts)
+#                          metadata  — run scalars (run_mode)
+#                        optional: true means "absent on the happy path / first invocation"
+
+defaults:
+  partial: partials/envelope.md
+
+agents:
+
+  requirements_analyst:
+    output_schema: RequirementsAnalystOutput
+    thinking:
+      enabled: false
+    inputs:
+      - { tag: run_mode,             kind: metadata,  optional: false, desc: "\"new_project\" or \"continuation\"." }
+      - { tag: human_brief,          kind: injected,  optional: false, desc: "The human's description of what to build." }
+      - { tag: clarification_history,kind: injected,  optional: true,  desc: "All prior question/answer rounds. Absent on first invocation." }
+      - { tag: confirm_rejection,    kind: injected,  optional: true,  desc: "Present only if the human rejected a completed doc; has rejected_doc_ref + rejection_feedback." }
+      - { tag: project_state,        kind: injected,  optional: true,  desc: "Continuation-mode context: architecture, tech_stack, feature_registry, decisions_log, assumptions_log renders + a typed requirements_summary. Absent in new_project mode." }
+      - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
+
+  architecture_designer:
+    output_schema: ArchitectureDesignerOutput
+    thinking:
+      enabled: true
+      budget_tokens: 8000
+    inputs:
+      - { tag: run_mode,             kind: metadata,  optional: false, desc: "\"new_project\" or \"continuation\"." }
+      - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document with acceptance criteria." }
+      - { tag: architecture,         kind: state_doc, optional: true,  desc: "Existing architecture (continuation mode). Absent for new projects." }
+      - { tag: tech_stack,           kind: state_doc, optional: true,  desc: "Existing locked tech decisions. Absent if none exist yet." }
+      - { tag: feature_registry,     kind: state_doc, optional: true,  desc: "Existing features and their stable interfaces." }
+      - { tag: spec_gap_context,     kind: injected,  optional: true,  desc: "Present only on spec-gap re-entry; has criterion_id, gap_description, affected_interfaces, affected_data_contracts." }
+      - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
+
+  coder:
+    output_schema: CoderOutput
+    thinking:
+      enabled: false
+    inputs:
+      - { tag: run_mode,             kind: metadata,  optional: false, desc: "\"new_project\" or \"continuation\"." }
+      - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document." }
+      - { tag: architecture_doc,     kind: artifact,  optional: false, desc: "The architecture design to implement." }
+      - { tag: tech_stack,           kind: state_doc, optional: true,  desc: "Locked tech decisions you must comply with." }
+      - { tag: existing_interfaces,  kind: injected,  optional: true,  desc: "Stable interfaces from prior runs your code must not break." }
+      - { tag: retry_context,        kind: injected,  optional: true,  desc: "Present on retry; has trigger and the findings to fix. Mutually exclusive with code_fix_context." }
+      - { tag: code_fix_context,     kind: injected,  optional: true,  desc: "Present on code-bug re-entry from the test phase; has flagged_criterion_ids only. Mutually exclusive with retry_context." }
+      - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
+
+  code_reviewer:
+    output_schema: CodeReviewerOutput
+    thinking:
+      enabled: true
+      budget_tokens: 6000
+    inputs:
+      - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document." }
+      - { tag: architecture_doc,     kind: artifact,  optional: false, desc: "The architecture the code should implement." }
+      - { tag: code_artifact,        kind: artifact,  optional: false, desc: "The generated code with all files." }
+      - { tag: decisions_log,        kind: state_doc, optional: true,  desc: "Prior decisions made during this project." }
+      - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
+
+  security_reviewer:
+    output_schema: SecurityReviewerOutput
+    thinking:
+      enabled: true
+      budget_tokens: 6000
+    inputs:
+      - { tag: tech_stack,           kind: state_doc, optional: false, desc: "The locked technology decisions for this project." }
+      - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document." }
+      - { tag: code_artifact,        kind: artifact,  optional: false, desc: "The generated code with all files." }
+      - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
+
+  test_designer:
+    output_schema: TestDesignerOutput
+    thinking:
+      enabled: false
+    inputs:
+      - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document with acceptance criteria." }
+      - { tag: interface_manifest,   kind: artifact,  optional: false, desc: "Projection: interfaces, data_contracts, acceptance_criteria. No implementation detail." }
+      - { tag: test_coverage_map,    kind: state_doc, optional: true,  desc: "What has already been tested in prior runs." }
+      - { tag: feature_registry,     kind: state_doc, optional: true,  desc: "Existing features and their stable interfaces." }
+      - { tag: retry_context,        kind: injected,  optional: true,  desc: "Present on fail_test_bug retry; has failed_test_cases. Mutually exclusive with code_fix_context." }
+      - { tag: code_fix_context,     kind: injected,  optional: true,  desc: "Present on fail_code_bug re-entry; has flagged_criterion_ids only. Mutually exclusive with retry_context." }
+      - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
+
+  test_analyst:
+    output_schema: TestAnalystOutput
+    thinking:
+      enabled: true
+      budget_tokens: 10000
+    inputs:
+      - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document with acceptance criteria." }
+      - { tag: test_suite,           kind: artifact,  optional: false, desc: "The full test suite with all test cases and their code." }
+      - { tag: test_results,         kind: artifact,  optional: false, desc: "Structured pytest output: per-test status, error messages, stack traces, failed assertions." }
+      - { tag: test_coverage_map,    kind: state_doc, optional: true,  desc: "Existing coverage state from prior runs." }
+      - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }

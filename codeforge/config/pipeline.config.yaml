@@ -43,43 +43,52 @@ agents:
     model: "claude-sonnet-4-6"
     temperature: 0.3
     max_tokens: 4096
-    system_prompt: "prompts/requirements_analyst.md"
+    system_prompt: "prompts/rendered/requirements_analyst.md"
     metadata:
       agent_id: "requirements_analyst"
       pipeline: "dev-pipeline-v1"
 
   architecture_designer:
     model: "claude-sonnet-4-6"
-    temperature: 0.2
-    max_tokens: 8192
-    system_prompt: "prompts/architecture_designer.md"
+    temperature: 1            # required when thinking is enabled
+    max_tokens: 16000         # must exceed thinking.budget_tokens (8000)
+    thinking:
+      enabled: true
+      budget_tokens: 8000
+    system_prompt: "prompts/rendered/architecture_designer.md"
     metadata:
       agent_id: "architecture_designer"
       pipeline: "dev-pipeline-v1"
 
   coder:
-    model: "claude-sonnet-4-6"
+    model: "claude-opus-4-8"
     temperature: 0.2
     max_tokens: 8192
-    system_prompt: "prompts/coder.md"
+    system_prompt: "prompts/rendered/coder.md"
     metadata:
       agent_id: "coder"
       pipeline: "dev-pipeline-v1"
 
   code_reviewer:
     model: "claude-sonnet-4-6"
-    temperature: 0.1
-    max_tokens: 4096
-    system_prompt: "prompts/code_reviewer.md"
+    temperature: 1            # required when thinking is enabled
+    max_tokens: 12000         # must exceed thinking.budget_tokens (6000)
+    thinking:
+      enabled: true
+      budget_tokens: 6000
+    system_prompt: "prompts/rendered/code_reviewer.md"
     metadata:
       agent_id: "code_reviewer"
       pipeline: "dev-pipeline-v1"
 
   security_reviewer:
     model: "claude-sonnet-4-6"
-    temperature: 0.1
-    max_tokens: 4096
-    system_prompt: "prompts/security_reviewer.md"
+    temperature: 1            # required when thinking is enabled
+    max_tokens: 12000         # must exceed thinking.budget_tokens (6000)
+    thinking:
+      enabled: true
+      budget_tokens: 6000
+    system_prompt: "prompts/rendered/security_reviewer.md"
     metadata:
       agent_id: "security_reviewer"
       pipeline: "dev-pipeline-v1"
@@ -88,16 +97,19 @@ agents:
     model: "claude-sonnet-4-6"
     temperature: 0.1
     max_tokens: 4096
-    system_prompt: "prompts/test_designer.md"
+    system_prompt: "prompts/rendered/test_designer.md"
     metadata:
       agent_id: "test_designer"
       pipeline: "dev-pipeline-v1"
 
   test_analyst:
     model: "claude-sonnet-4-6"
-    temperature: 0.1
-    max_tokens: 4096
-    system_prompt: "prompts/test_analyst.md"
+    temperature: 1            # required when thinking is enabled
+    max_tokens: 18000         # must exceed thinking.budget_tokens (10000)
+    thinking:
+      enabled: true
+      budget_tokens: 10000
+    system_prompt: "prompts/rendered/test_analyst.md"
     metadata:
       agent_id: "test_analyst"
       pipeline: "dev-pipeline-v1"

@@ -1,0 +1,78 @@
+{
+  "output": {
+    "run_mode": "new_project",
+    "modules": [
+      {
+        "name": "EvenSum",
+        "responsibility": "Compute the sum of even integers in a list.",
+        "dependencies": [],
+        "exposes": ["sum_even"],
+        "consumes": []
+      }
+    ],
+    "interfaces": [
+      {
+        "name": "sum_even",
+        "kind": "function",
+        "owner_module": "EvenSum",
+        "contract": {
+          "import_path": "src.even_sum.sum_even",
+          "signature": "sum_even(numbers: list[int]) -> int",
+          "parameters": [
+            { "name": "numbers", "type": "list[int]", "description": "Integers to filter and sum." }
+          ],
+          "returns": { "type": "int", "description": "Sum of even integers; 0 if none or empty input." },
+          "raises": [
+            { "exception": "TypeError", "when": "numbers is not a list of integers." }
+          ]
+        },
+        "stability": "stable",
+        "successor": null,
+        "removal_run": null
+      }
+    ],
+    "data_flow": [
+      {
+        "name": "SumEvenCall",
+        "from": "Caller",
+        "to": "EvenSum",
+        "via": "sum_even",
+        "data_description": "A list of integers in; a single integer sum out."
+      }
+    ],
+    "tech_decisions": [
+      {
+        "id": "TD-001",
+        "domain": "language",
+        "decision": "Python 3.12 with type hints throughout.",
+        "rationale": "Matches the pipeline's Python-only MVP target and the requirement for type hints.",
+        "locked": true,
+        "record": true,
+        "supersedes": null
+      }
+    ],
+    "criteria_coverage": [
+      {
+        "criterion_id": "AC-001",
+        "module_names": ["EvenSum"],
+        "notes": "sum_even filters even integers and returns their sum."
+      },
+      {
+        "criterion_id": "AC-002",
+        "module_names": ["EvenSum"],
+        "notes": "Empty input returns 0 via the same function."
+      }
+    ],
+    "diff": null
+  },
+  "assumptions_made": [
+    {
+      "id": "ASSUME-001",
+      "description": "An empty input list should return 0 rather than raising; the brief did not specify but 0 is the natural identity for a sum.",
+      "impact": "low",
+      "record": true
+    }
+  ],
+  "confidence": 0.9,
+  "unresolved_flags": []
+}

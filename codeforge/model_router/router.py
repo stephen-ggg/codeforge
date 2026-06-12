@@ -6,18 +6,35 @@ Swapping the LLM provider library means editing this file only.
 
 Responsibilities:
   - Translate a generic complete() call into the correct LiteLLM API call
-  - Look up model, temperature, max_tokens, fallback_model from config
+  - Look up model, temperature, max_tokens, fallback_model, thinking from config
+  - Enable Anthropic extended thinking when configured (claude-* models only);
+    fall back to a <thinking> scratchpad instruction for non-Anthropic models
+  - Normalise the response: strip any thinking block, extract the JSON text so the
+    orchestrator always receives a clean JSON string regardless of provider
   - Stamp every call with agent_id, run_id, and pipeline metadata
   - Capture litellm_call_id as the authoritative cost-attribution identifier
   - On provider error: retry once with fallback_model if configured
-  - Return RouterResult — raw text content, call id, model used, token usage
+  - Return RouterResult — extracted text content, raw thinking (for debug), call id,
+    model used, token usage
 
-The router does NOT validate response content. That is the orchestrator's job.
+The router does NOT validate response content against the schema. That is the
+orchestrator's job. It only extracts the JSON-bearing text from the response envelope.
+
+=== CHANGES FROM PRE-THINKING VERSION ===
+  * _call now passes a `thinking={...}` param and forces temperature=1 when thinking
+    is enabled on an Anthropic model.
+  * Response handling moved into _extract_content(), which accepts both a plain string
+    and a list of typed blocks (Anthropic thinking shape via LiteLLM).
+  * complete() decides per-agent whether thinking is available; if configured-but-
+    unavailable (non-Anthropic), it appends a scratchpad instruction to the user turn
+    and the extractor strips the prose before the final JSON object.
+  * RouterResult gains `thinking` (raw reasoning text, for raw_outputs/ debugging).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,17 +45,26 @@ from codeforge.schemas.contracts import AgentId
 
 logger = logging.getLogger(__name__)
 
-# Silence LiteLLM's verbose success logging — we log at the router level instead
 litellm.suppress_debug_info = True
+
+# Appended to the user turn ONLY when thinking is configured but the model can't do it
+# natively (non-Anthropic provider). Anthropic models get a real thinking block instead.
+_SCRATCHPAD_INSTRUCTION = (
+    "\n\n---\n\n"
+    "Before your output object, reason through the problem in plain text. "
+    "When you are done reasoning, output the JSON object as the final thing in your "
+    "response. The JSON object must be the last content you produce."
+)
 
 
 @dataclass
 class RouterResult:
     """Result of a single LiteLLM completion call."""
-    content: str                            # raw text response from the model
+    content: str                            # extracted JSON-bearing text (thinking stripped)
     litellm_call_id: str                    # authoritative cost-attribution identifier
     model_used: str                         # actual model that responded (may be fallback)
-    usage: dict[str, Any] = field(default_factory=dict)  # token counts from provider
+    thinking: str | None = None             # raw reasoning, for raw_outputs/ — not validated
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 class RouterError(Exception):
@@ -53,13 +79,15 @@ class RouterError(Exception):
         )
 
 
-class ModelRouter:
-    """
-    Routes agent completion requests through LiteLLM.
+def _supports_native_thinking(model: str) -> bool:
+    """Extended thinking is an Anthropic feature. LiteLLM model strings for Anthropic
+    start with 'claude-' (or 'anthropic/')."""
+    m = model.lower()
+    return m.startswith("claude-") or m.startswith("anthropic/")
 
-    One instance per pipeline run. Thread-safe for reading config;
-    each complete() call is independent.
-    """
+
+class ModelRouter:
+    """Routes agent completion requests through LiteLLM. One instance per run."""
 
     def __init__(self, config: ConfigSnapshot) -> None:
         self._config = config
@@ -71,15 +99,7 @@ class ModelRouter:
         user_turn: str,
         run_id: str,
     ) -> RouterResult:
-        """
-        Call the configured LLM for agent_id and return the result.
-
-        Steps:
-          1. Look up model, temperature, max_tokens, fallback_model from config
-          2. Build metadata dict for cost attribution and audit
-          3. Call litellm.completion() with the primary model
-          4. On failure: retry once with fallback_model if configured
-          5. Return RouterResult
+        """Call the configured LLM for agent_id and return a normalised result.
 
         Raises:
             RouterError: if both primary and fallback calls fail.
@@ -87,8 +107,7 @@ class ModelRouter:
         agent_config = self._config.agents.get(agent_id)
         if agent_config is None:
             raise RouterError(
-                agent_id,
-                "<unknown>",
+                agent_id, "<unknown>",
                 ValueError(f"No config found for agent '{agent_id}'"),
             )
 
@@ -99,12 +118,29 @@ class ModelRouter:
             "pipeline_version": self._config.pipeline,
         }
 
+        thinking_cfg = getattr(agent_config, "thinking", None)
+        want_thinking = bool(thinking_cfg and thinking_cfg.enabled)
+        native = want_thinking and _supports_native_thinking(agent_config.model)
+
+        # Non-native providers that still want reasoning get the scratchpad instruction.
+        effective_user_turn = user_turn
+        if want_thinking and not native:
+            logger.info(
+                "Agent '%s' has thinking enabled but model '%s' is not Anthropic; "
+                "using scratchpad fallback.", agent_id, agent_config.model,
+            )
+            effective_user_turn = user_turn + _SCRATCHPAD_INSTRUCTION
+
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_turn},
+            {"role": "user", "content": effective_user_turn},
         ]
 
-        # Primary attempt
+        thinking_param = (
+            {"type": "enabled", "budget_tokens": thinking_cfg.budget_tokens}
+            if native and thinking_cfg is not None else None
+        )
+
         try:
             return self._call(
                 model=agent_config.model,
@@ -113,41 +149,52 @@ class ModelRouter:
                 max_tokens=agent_config.max_tokens,
                 metadata=metadata,
                 agent_id=agent_id,
+                thinking_param=thinking_param,
             )
         except Exception as primary_exc:
             logger.warning(
                 "Primary model failed for agent '%s' (model: %s): %s",
-                agent_id,
-                agent_config.model,
-                primary_exc,
+                agent_id, agent_config.model, primary_exc,
             )
-
             if not agent_config.fallback_model:
                 raise RouterError(agent_id, agent_config.model, primary_exc) from primary_exc
 
-            # Fallback attempt — one retry only
-            logger.info(
-                "Retrying agent '%s' with fallback model '%s'",
-                agent_id,
-                agent_config.fallback_model,
+            # Fallback: thinking availability is recomputed for the fallback model.
+            fb_native = want_thinking and _supports_native_thinking(agent_config.fallback_model)
+            fb_messages = messages
+            fb_thinking = (
+                {"type": "enabled", "budget_tokens": thinking_cfg.budget_tokens}
+                if fb_native and thinking_cfg is not None else None
             )
+            if want_thinking and not fb_native and not native:
+                # already added scratchpad; leave as-is
+                pass
+            elif want_thinking and not fb_native and native:
+                # primary was native (no scratchpad) but fallback isn't — add it now
+                fb_messages = [
+                    messages[0],
+                    {"role": "user", "content": user_turn + _SCRATCHPAD_INSTRUCTION},
+                ]
+
+            logger.info("Retrying agent '%s' with fallback '%s'", agent_id, agent_config.fallback_model)
             try:
                 return self._call(
                     model=agent_config.fallback_model,
-                    messages=messages,
+                    messages=fb_messages,
                     temperature=agent_config.temperature,
                     max_tokens=agent_config.max_tokens,
                     metadata=metadata,
                     agent_id=agent_id,
+                    thinking_param=fb_thinking,
                 )
             except Exception as fallback_exc:
                 logger.error(
                     "Fallback model also failed for agent '%s' (model: %s): %s",
-                    agent_id,
-                    agent_config.fallback_model,
-                    fallback_exc,
+                    agent_id, agent_config.fallback_model, fallback_exc,
                 )
-                raise RouterError(agent_id, agent_config.fallback_model, fallback_exc) from fallback_exc
+                raise RouterError(
+                    agent_id, agent_config.fallback_model, fallback_exc
+                ) from fallback_exc
 
     def _call(
         self,
@@ -157,47 +204,99 @@ class ModelRouter:
         max_tokens: int,
         metadata: dict[str, str],
         agent_id: AgentId,
+        thinking_param: dict[str, Any] | None = None,
     ) -> RouterResult:
-        """
-        Make a single litellm.completion() call and extract the result.
+        """Make a single litellm.completion() call and normalise the result."""
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "metadata": metadata,
+        }
+        if thinking_param is not None:
+            # Anthropic requires temperature == 1 when extended thinking is enabled.
+            kwargs["thinking"] = thinking_param
+            kwargs["temperature"] = 1
+        else:
+            kwargs["temperature"] = temperature
 
-        litellm_call_id is captured from the response object.
-        Provider metadata passthrough is best-effort and varies by provider.
-        """
-        response = litellm.completion(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            metadata=metadata,
-        )
+        response = litellm.completion(**kwargs)
 
-        # Extract content — LiteLLM returns an OpenAI-compatible response object
-        content: str = response.choices[0].message.content or ""
+        message = response.choices[0].message
+        raw_content = getattr(message, "content", None)
+        text, thinking = self._extract_content(raw_content, message)
+        json_text = self._extract_json(text)
 
-        # litellm_call_id: prefer the LiteLLM-level id; fall back to the provider id
         litellm_call_id: str = (
             getattr(response, "_hidden_params", {}).get("litellm_call_id")
             or getattr(response, "id", "")
             or ""
         )
 
-        # Token usage — best-effort, varies by provider
         usage: dict[str, Any] = {}
         if hasattr(response, "usage") and response.usage is not None:
             usage = dict(response.usage)
 
         logger.info(
-            "Router: agent=%s model=%s call_id=%s tokens=%s",
-            agent_id,
-            model,
-            litellm_call_id,
-            usage,
+            "Router: agent=%s model=%s call_id=%s thinking=%s tokens=%s",
+            agent_id, model, litellm_call_id, "yes" if thinking else "no", usage,
         )
 
         return RouterResult(
-            content=content,
+            content=json_text,
             litellm_call_id=litellm_call_id,
             model_used=model,
+            thinking=thinking,
             usage=usage,
         )
+
+    @staticmethod
+    def _extract_content(raw_content: Any, message: Any) -> tuple[str, str | None]:
+        """Return (text, thinking) from a message whose content may be a string or a
+        list of typed blocks (Anthropic extended-thinking shape via LiteLLM)."""
+        # Some LiteLLM versions surface reasoning on a dedicated attribute.
+        attr_thinking = getattr(message, "reasoning_content", None)
+
+        if isinstance(raw_content, list):
+            text_parts: list[str] = []
+            thinking_parts: list[str] = []
+            for block in raw_content:
+                if isinstance(block, dict):
+                    btype = block.get("type")
+                    if btype == "thinking":
+                        thinking_parts.append(block.get("thinking", ""))
+                    elif btype in ("text", None):
+                        text_parts.append(block.get("text", ""))
+                else:
+                    btype = getattr(block, "type", None)
+                    if btype == "thinking":
+                        thinking_parts.append(getattr(block, "thinking", ""))
+                    elif btype in ("text", None):
+                        text_parts.append(getattr(block, "text", ""))
+            thinking = "\n".join(p for p in thinking_parts if p) or attr_thinking
+            return "".join(text_parts), thinking
+
+        return (raw_content or ""), attr_thinking
+
+    @staticmethod
+    def _extract_json(text: str) -> str:
+        """Strip markdown fences / leading prose and return the final top-level JSON
+        object substring. With native thinking this is a no-op (text is already pure
+        JSON); it exists for the scratchpad fallback path and stray-fence robustness."""
+        s = text.strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+            s = re.sub(r"\n?```$", "", s).strip()
+        if s.startswith("{") and s.endswith("}"):
+            return s
+        depth, start, last = 0, None, None
+        for i, ch in enumerate(s):
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start is not None:
+                    last = s[start:i + 1]
+        return last if last is not None else s

@@ -1,0 +1,70 @@
+{
+  "output": {
+    "test_cases": [
+      {
+        "id": "TC-001",
+        "title": "Sums even integers in a mixed list",
+        "criterion_ids": ["AC-001"],
+        "type": "unit",
+        "description": "Given a list with both even and odd integers, sum_even returns the sum of only the even values.",
+        "code": [
+          {
+            "path": "tests/test_even_sum.py",
+            "content": "from src.even_sum import sum_even\n\n\ndef test_sums_even_integers():\n    assert sum_even([1, 2, 3, 4, 5, 6]) == 12\n\n\ndef test_returns_zero_for_empty_list():\n    assert sum_even([]) == 0\n",
+            "language": "python",
+            "change_type": "new",
+            "change_reason": "Covers AC-001 and AC-002."
+          }
+        ],
+        "explicitly_not_testing": ["Non-integer input handling (covered separately)."]
+      },
+      {
+        "id": "TC-002",
+        "title": "Returns zero for an empty list",
+        "criterion_ids": ["AC-002"],
+        "type": "unit",
+        "description": "Given an empty list, sum_even returns 0.",
+        "code": [
+          {
+            "path": "tests/test_even_sum.py",
+            "content": "# (assertion lives in test_returns_zero_for_empty_list above)\n",
+            "language": "python",
+            "change_type": "modified",
+            "change_reason": "Empty-list assertion grouped into the same module."
+          }
+        ],
+        "explicitly_not_testing": ["Performance on large lists."]
+      }
+    ],
+    "test_infrastructure": [
+      {
+        "path": "requirements-test.txt",
+        "content": "pytest>=8.0\n",
+        "language": "text",
+        "change_type": "new",
+        "change_reason": "Declares test-only dependencies installed by the runner before pytest."
+      },
+      {
+        "path": "tests/conftest.py",
+        "content": "# Shared fixtures for the even-sum test suite.\n",
+        "language": "python",
+        "change_type": "new",
+        "change_reason": "Placeholder for shared fixtures."
+      }
+    ],
+    "coverage_map": [
+      { "criterion_id": "AC-001", "test_case_ids": ["TC-001"] },
+      { "criterion_id": "AC-002", "test_case_ids": ["TC-001", "TC-002"] }
+    ]
+  },
+  "assumptions_made": [
+    {
+      "id": "ASSUME-001",
+      "description": "AC-003 (type rejection) is left uncovered this run because the interface manifest does not specify which exception type is contractually guaranteed.",
+      "impact": "medium",
+      "record": true
+    }
+  ],
+  "confidence": 0.83,
+  "unresolved_flags": []
+}
