@@ -1,7 +1,7 @@
 """
 schemas/contracts.py — Runtime source of truth for all codeforge data shapes.
 
-Translated from the TypeScript interfaces in agent-contracts_v5.md.
+Translated from the TypeScript interfaces in agent-contracts_v6.md.
 The TypeScript interfaces are the design document; these Pydantic v2 models are the
 implementation. Both must stay in sync — a contract change requires updating both.
 
@@ -14,7 +14,6 @@ from typing import Any, Generic, Literal, TypeVar, Union
 from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from pydantic.generics import GenericModel  # pydantic v1 compat shim handled below
 
 
 # ---------------------------------------------------------------------------
