@@ -331,6 +331,20 @@ def resume(
 
         sm.resume_run(codeforge_run)
 
+        # Write human_override entry when the operator modified the run
+        if unresolved and escalation.resolution and escalation.resolution.outcome == "modified":
+            import uuid as _uuid
+            from datetime import datetime, timezone
+            sm.pending.merge_append("decisions_log", [{
+                "entry_id": str(_uuid.uuid4()),
+                "run_id": run_id,
+                "entry_type": "human_override",
+                "source_agent": None,
+                "decision": escalation.resolution.change_summary or "",
+                "rationale": escalation.resolution.human_notes,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }])
+
         # Apply counter resets from the operator's resolution directive (if any)
         initial_state = "requirements"
         if unresolved and escalation.resolution and escalation.resolution.reentry_directive:
