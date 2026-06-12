@@ -954,6 +954,186 @@ class StateMachine:
         self.event_log.update_run_snapshot(self.run)
 
     # ------------------------------------------------------------------
+    # Top-level orchestration
+    # ------------------------------------------------------------------
+
+    def _load_prompts(self) -> dict[str, str]:
+        """Read rendered system prompts from config/prompts/rendered/."""
+        from pathlib import Path as _Path
+        rendered_dir = _Path(__file__).parent.parent / "config" / "prompts" / "rendered"
+        agent_ids = [
+            "requirements_analyst",
+            "architecture_designer",
+            "coder",
+            "code_reviewer",
+            "security_reviewer",
+            "test_designer",
+            "test_analyst",
+        ]
+        prompts: dict[str, str] = {}
+        for aid in agent_ids:
+            p = rendered_dir / f"{aid}.md"
+            if not p.exists():
+                raise FileNotFoundError(
+                    f"Rendered prompt not found: {p}. "
+                    "Run `python -m codeforge.config.prompts.prompt_builder` to build prompts."
+                )
+            prompts[aid] = p.read_text(encoding="utf-8")
+        return prompts
+
+    def execute(
+        self, human_brief: str, human_interface: Any
+    ) -> "tuple[RequirementsDoc, CodeArtifact, TestSuite]":
+        """Drive phases 1–6. CommitWriter is handled by the CLI caller."""
+        from codeforge.agents.test_runner import InfrastructureError, TestRunner
+        from codeforge.schemas.contracts import TestRunnerInput
+
+        prompts = self._load_prompts()
+        req_doc = self.run_phase1(human_brief, human_interface, prompts["requirements_analyst"])
+
+        next_state = "architecture"
+        spec_gap_context: dict[str, Any] | None = None
+        code_fix_context: dict[str, Any] | None = None
+        arch_doc: ArchitectureDoc | None = None
+        code_art: CodeArtifact | None = None
+        test_suite: TestSuite | None = None
+        runner_results: Any = None
+
+        while next_state != "done":
+            if next_state == "architecture":
+                assert arch_doc is not None or next_state == "architecture"
+                arch_doc = self.run_phase2(
+                    req_doc, prompts["architecture_designer"], human_interface,
+                    spec_gap_context=spec_gap_context,
+                )
+                spec_gap_context = None
+                next_state = "coding"
+
+            elif next_state == "coding":
+                assert arch_doc is not None
+                code_art = self._run_impl_with_reviews(
+                    req_doc, arch_doc, prompts, human_interface, code_fix_context
+                )
+                code_fix_context = None
+                next_state = "test_design"
+
+            elif next_state == "test_design":
+                assert arch_doc is not None
+                test_suite = self.run_phase5_design(
+                    req_doc, arch_doc, prompts["test_designer"]
+                )
+                next_state = "test_execution"
+
+            elif next_state == "test_execution":
+                assert code_art is not None
+                assert test_suite is not None
+                runner = TestRunner(self._config)
+                try:
+                    runner_results = runner.run(
+                        TestRunnerInput(
+                            test_suite=test_suite,
+                            code_artifact=code_art,
+                            run_config={},
+                        )
+                    )
+                except InfrastructureError as exc:
+                    self._escalate("human_required", str(exc))
+                next_state = "test_analysis"
+
+            elif next_state == "test_analysis":
+                assert test_suite is not None
+                assert runner_results is not None
+                analysis = self.run_phase5_analysis(
+                    req_doc, test_suite, runner_results.model_dump(), prompts["test_analyst"]
+                )
+                verdict = analysis.verdict
+
+                if verdict == "pass":
+                    outcome = route_p5c_pass()
+                    self._apply_outcome(outcome)
+                    next_state = "done"
+
+                elif verdict == "fail_code_bug":
+                    outcome = route_p5c_code_bug(self.run.retry_counters, self._config.to_dict())
+                    self._apply_outcome(outcome)
+                    if outcome.decision == "escalate":
+                        self._escalate(outcome.escalation_reason or "max_retries_exceeded")
+                    code_fix_context = _build_code_fix_context(analysis, test_suite)
+                    next_state = "coding"
+
+                elif verdict == "fail_test_bug":
+                    outcome = route_p5c_test_bug(self.run.retry_counters, self._config.to_dict())
+                    self._apply_outcome(outcome)
+                    if outcome.decision == "escalate":
+                        self._escalate(outcome.escalation_reason or "max_retries_exceeded")
+                    next_state = "test_design"
+
+                elif verdict == "fail_spec_gap":
+                    outcome = route_p5c_spec_gap(self.run.retry_counters, self._config.to_dict())
+                    self._apply_outcome(outcome)
+                    if outcome.decision == "escalate":
+                        self._escalate(outcome.escalation_reason or "max_retries_exceeded")
+                    spec_gap_context = _build_spec_gap_context(analysis)
+                    next_state = "architecture"
+
+                elif verdict == "fail_ambiguous":
+                    outcome = route_p5c_ambiguous()
+                    self._apply_outcome(outcome)
+                    self._escalate(outcome.escalation_reason or "human_required")
+
+                else:  # "error"
+                    outcome = route_p5c_analyst_error(
+                        self.run.retry_counters, self._config.to_dict()
+                    )
+                    self._apply_outcome(outcome)
+                    if outcome.decision == "escalate":
+                        self._escalate(outcome.escalation_reason or "human_required")
+                    next_state = "test_execution"
+
+        self.run_phase6()
+        assert code_art is not None
+        assert test_suite is not None
+        return req_doc, code_art, test_suite
+
+    def _run_impl_with_reviews(
+        self,
+        req_doc: RequirementsDoc,
+        arch_doc: ArchitectureDoc,
+        prompts: dict[str, str],
+        human_interface: Any,
+        code_fix_context: dict[str, Any] | None = None,
+    ) -> CodeArtifact:
+        """Inner loop: coder → code review → security review. Retries on review failure."""
+        retry_context: dict[str, Any] | None = None
+        while True:
+            code_art = self.run_phase3(
+                req_doc, arch_doc, prompts["coder"], retry_context, code_fix_context
+            )
+            code_fix_context = None  # only applies to the first coding attempt
+
+            try:
+                self.run_phase4a(req_doc, arch_doc, code_art, prompts["code_reviewer"])
+            except _ReviewFailed as exc:
+                retry_context = {
+                    "trigger": "code_review_fail",
+                    "review_findings": [f.model_dump() for f in exc.report.findings],
+                    "review_summary": exc.report.summary,
+                }
+                continue
+
+            try:
+                self.run_phase4b(req_doc, code_art, prompts["security_reviewer"])
+            except _ReviewFailed as exc:
+                retry_context = {
+                    "trigger": "security_review_fail",
+                    "security_findings": [f.model_dump() for f in exc.report.findings],
+                    "security_summary": exc.report.summary,
+                }
+                continue
+
+            return code_art
+
+    # ------------------------------------------------------------------
     # Terminal
     # ------------------------------------------------------------------
 
@@ -973,3 +1153,34 @@ class _ReviewFailed(Exception):
         self.kind = kind
         self.report = report
         super().__init__(f"{kind} review failed")
+
+
+# ---------------------------------------------------------------------------
+# Module-level context builders
+# ---------------------------------------------------------------------------
+
+def _build_code_fix_context(
+    analysis: "TestAnalysis", test_suite: "TestSuite"
+) -> dict[str, Any]:
+    """Build the code_fix_context dict passed back to the coder after a test failure."""
+    failed_ids = [
+        fa.test_case_id
+        for fa in analysis.failure_analyses
+        if fa.root_cause_hypothesis == "code_bug"
+    ]
+    return {
+        "trigger": "test_fail_code_bug",
+        "test_summary": analysis.summary,
+        "failed_test_case_ids": failed_ids,
+        "failure_analyses": [fa.model_dump() for fa in analysis.failure_analyses],
+    }
+
+
+def _build_spec_gap_context(analysis: "TestAnalysis") -> dict[str, Any]:
+    """Build the spec_gap_context dict passed to the architecture designer."""
+    result: dict[str, Any] = {
+        "trigger": "test_fail_spec_gap",
+        "test_summary": analysis.summary,
+        "failure_analyses": [fa.model_dump() for fa in analysis.failure_analyses],
+    }
+    return result
