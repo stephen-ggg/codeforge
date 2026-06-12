@@ -1101,9 +1101,15 @@ class StateMachine:
                             run_config={},
                         )
                     )
+                    next_state = "test_analysis"
                 except InfrastructureError as exc:
-                    self._escalate("human_required", str(exc))
-                next_state = "test_analysis"
+                    outcome = route_p5e_error(
+                        self.run.retry_counters, self._config.to_dict()
+                    )
+                    self._apply_outcome(outcome)
+                    if outcome.decision == "escalate":
+                        self._escalate(outcome.escalation_reason or "human_required", str(exc))
+                    # retry: stay in test_execution
 
             elif next_state == "test_analysis":
                 assert test_suite is not None
