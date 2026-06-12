@@ -98,49 +98,73 @@ def _do_commit(
     project_dir: Path,
 ) -> None:
     from codeforge.agents.commit_writer import CommitWriter
+    from codeforge.orchestrator.routing import route_p6_state_fail, route_p6_src_fail, route_p6_success
 
     run = sm.run
     writer = CommitWriter(config, project_dir)
+    state_commit_sha: str | None = None
 
-    # Commit codeforge state (project-state/ dir already written by run_phase6)
-    state_result = writer.commit_codeforge_state(
-        CommitWriterInput(
-            target="codeforge_state",
-            run_id=run.run_id,
-            codeforge_version=config.name,
-            feature_title=req_doc.feature_title,
-            ac_ids=[ac.id for ac in req_doc.acceptance_criteria],
+    # Commit codeforge state — retry up to codeforge_state_commit limit
+    while True:
+        state_result = writer.commit_codeforge_state(
+            CommitWriterInput(
+                target="codeforge_state",
+                run_id=run.run_id,
+                codeforge_version=config.name,
+                feature_title=req_doc.feature_title,
+                ac_ids=[ac.id for ac in req_doc.acceptance_criteria],
+            )
         )
-    )
-    if state_result.success:
-        typer.echo(f"Codeforge state committed: {state_result.commit_sha}")
-    else:
+        if state_result.success:
+            state_commit_sha = state_result.commit_sha
+            typer.echo(f"Codeforge state committed: {state_commit_sha}")
+            break
+
+        outcome = route_p6_state_fail(run.retry_counters, config.to_dict())
+        sm._apply_outcome(outcome)  # increments counter + emits routing event
+        if outcome.decision == "escalate":
+            raise EscalationError(
+                "commit_failure",
+                f"State commit failed after retries: {state_result.error_message}",
+            )
         typer.echo(
-            f"Warning: codeforge state commit failed: {state_result.error_message}", err=True
+            f"State commit failed, retrying ({state_result.error_message})", err=True
         )
 
-    # Commit source code + open PR
-    src_result = writer.commit_source_code(
-        CommitWriterInput(
-            target="source_code",
-            run_id=run.run_id,
-            codeforge_version=config.name,
-            feature_title=req_doc.feature_title,
-            ac_ids=[ac.id for ac in req_doc.acceptance_criteria],
-            source_code={
-                "code_artifact": code_art.model_dump(),
-                "test_suite": test_suite.model_dump(),
-            },
+    # Commit source code — retry up to source_code_commit limit
+    while True:
+        src_result = writer.commit_source_code(
+            CommitWriterInput(
+                target="source_code",
+                run_id=run.run_id,
+                codeforge_version=config.name,
+                feature_title=req_doc.feature_title,
+                ac_ids=[ac.id for ac in req_doc.acceptance_criteria],
+                source_code={
+                    "code_artifact": code_art.model_dump(),
+                    "test_suite": test_suite.model_dump(),
+                    "codeforge_state_commit_sha": state_commit_sha,
+                },
+            )
         )
-    )
-    if src_result.success:
-        typer.echo(f"Source code committed: {src_result.commit_sha}")
-        if src_result.pr_url:
-            typer.echo(f"PR opened: {src_result.pr_url}")
-    else:
+        if src_result.success:
+            typer.echo(f"Source code committed: {src_result.commit_sha}")
+            if src_result.pr_url:
+                typer.echo(f"PR opened: {src_result.pr_url}")
+            break
+
+        outcome = route_p6_src_fail(run.retry_counters, config.to_dict())
+        sm._apply_outcome(outcome)
+        if outcome.decision == "escalate":
+            raise EscalationError(
+                "commit_failure",
+                f"Source commit failed after retries: {src_result.error_message}",
+            )
         typer.echo(
-            f"Warning: source code commit failed: {src_result.error_message}", err=True
+            f"Source commit failed, retrying ({src_result.error_message})", err=True
         )
+
+    sm._apply_outcome(route_p6_success())
 
 
 # ---------------------------------------------------------------------------
