@@ -1,0 +1,349 @@
+"""
+cli/commands.py — Typer CLI for codeforge-v1.
+
+Three commands:
+  init    — scaffold .codeforge/ in a project directory
+  run     — execute a codeforge run end-to-end
+  resume  — resume a codeforge run that was interrupted by an escalation
+
+The CLI is a thin wrapper: it owns the lock, loads config, creates the state machine,
+drives execute(), and hands off to CommitWriter. All phase logic lives in the state machine.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from typing import Any, Optional
+
+import typer
+
+from codeforge.cli.interaction import HumanInteraction
+from codeforge.cli.lock import CodeforgeAlreadyRunningError, CodeforgeLock
+from codeforge.config.config_loader import load_config
+from codeforge.orchestrator.state_machine import EscalationError, StateMachine
+from codeforge.schemas.contracts import CommitWriterInput
+
+app = typer.Typer(
+    name="codeforge",
+    help="codeforge — AI-driven software development tool.",
+    add_completion=False,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_CODEFORGE_CONFIG_TEMPLATE = """\
+# Project-local codeforge configuration
+# Fill in the required fields before running `codeforge run`.
+#
+# Merge rules: all keys here override the codeforge installation defaults.
+# You only need to set fields that differ from the defaults.
+
+repos:
+  codeforge_state:
+    remote: ""          # git remote URL for this codeforge state repo
+    branch: "main"
+
+  source_code:
+    path: ""            # absolute path to the source code repo on this machine
+    remote: ""          # git remote URL (used to open PRs)
+    default_branch: "main"
+    branch_prefix: "codeforge/"
+    pr_target: "main"
+    auto_merge: true
+    output_dir: "src"
+
+test_runner:
+  sandbox_image: ""     # Docker image tag for the test sandbox
+  timeout_seconds: 300
+  environment_vars: {}
+"""
+
+
+def _run_log_dir(project_dir: Path) -> Path:
+    return project_dir / "run-logs"
+
+
+def _load_brief(run_log_dir: Path, run_id: str) -> str | None:
+    brief_file = run_log_dir / run_id / "brief.txt"
+    if brief_file.exists():
+        return brief_file.read_text(encoding="utf-8").strip()
+    return None
+
+
+def _save_brief(run_log_dir: Path, run_id: str, brief: str) -> None:
+    dest = run_log_dir / run_id
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "brief.txt").write_text(brief, encoding="utf-8")
+
+
+def _load_codeforge_run(run_log_dir: Path, run_id: str) -> dict[str, Any]:
+    run_file = run_log_dir / run_id / "codeforge_run.json"
+    if not run_file.exists():
+        typer.echo(f"No codeforge_run.json found for run '{run_id}' in {run_log_dir}", err=True)
+        raise typer.Exit(1)
+    result: dict[str, Any] = json.loads(run_file.read_text(encoding="utf-8"))
+    return result
+
+
+def _do_commit(
+    sm: StateMachine,
+    req_doc: Any,
+    code_art: Any,
+    test_suite: Any,
+    config: Any,
+    project_dir: Path,
+) -> None:
+    from codeforge.agents.commit_writer import CommitWriter
+
+    run = sm.run
+    writer = CommitWriter(config, project_dir)
+
+    # Commit codeforge state (project-state/ dir already written by run_phase6)
+    state_result = writer.commit_codeforge_state(
+        CommitWriterInput(
+            target="codeforge_state",
+            run_id=run.run_id,
+            codeforge_version=config.name,
+            feature_title=req_doc.feature_title,
+            ac_ids=[ac.id for ac in req_doc.acceptance_criteria],
+        )
+    )
+    if state_result.success:
+        typer.echo(f"Codeforge state committed: {state_result.commit_sha}")
+    else:
+        typer.echo(
+            f"Warning: codeforge state commit failed: {state_result.error_message}", err=True
+        )
+
+    # Commit source code + open PR
+    src_result = writer.commit_source_code(
+        CommitWriterInput(
+            target="source_code",
+            run_id=run.run_id,
+            codeforge_version=config.name,
+            feature_title=req_doc.feature_title,
+            ac_ids=[ac.id for ac in req_doc.acceptance_criteria],
+            source_code={
+                "code_artifact": code_art.model_dump(),
+                "test_suite": test_suite.model_dump(),
+            },
+        )
+    )
+    if src_result.success:
+        typer.echo(f"Source code committed: {src_result.commit_sha}")
+        if src_result.pr_url:
+            typer.echo(f"PR opened: {src_result.pr_url}")
+    else:
+        typer.echo(
+            f"Warning: source code commit failed: {src_result.error_message}", err=True
+        )
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+@app.command()
+def init(
+    project_dir: Path = typer.Option(
+        ...,
+        "--project-dir",
+        "-d",
+        help="Path to the project directory to initialise.",
+        show_default=False,
+    ),
+) -> None:
+    """
+    Scaffold .codeforge/ configuration for a new managed project.
+
+    Creates .codeforge/codeforge.config.yaml with a template the operator
+    must fill in before running `codeforge run`.
+    """
+    codeforge_dir = project_dir / ".codeforge"
+    config_path = codeforge_dir / "codeforge.config.yaml"
+
+    if config_path.exists():
+        typer.echo(
+            f"Error: {config_path} already exists. "
+            "Delete it to reinitialise, or edit it directly.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    codeforge_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(_CODEFORGE_CONFIG_TEMPLATE, encoding="utf-8")
+
+    typer.echo(f"Initialised codeforge configuration at {config_path}")
+    typer.echo("Edit the file and fill in 'repos' and 'test_runner.sandbox_image' before running.")
+
+
+@app.command()
+def run(
+    project_dir: Path = typer.Option(
+        ...,
+        "--project-dir",
+        "-d",
+        help="Path to the managed project directory (contains .codeforge/).",
+        show_default=False,
+    ),
+    brief: str = typer.Option(
+        ...,
+        "--brief",
+        "-b",
+        help="One-sentence feature brief passed to the requirements analyst.",
+        show_default=False,
+    ),
+    run_mode: str = typer.Option(
+        "new_project",
+        "--run-mode",
+        help="'new_project' or 'continuation'.",
+    ),
+) -> None:
+    """
+    Execute a full codeforge run for the given project and brief.
+
+    Acquires a per-project lock, drives all seven phases, and
+    commits both codeforge state and source code on success.
+    """
+    config = _load_config_or_exit(project_dir)
+    lock = CodeforgeLock(project_dir)
+    human = HumanInteraction()
+
+    try:
+        lock.acquire()
+    except CodeforgeAlreadyRunningError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+    run_log_dir = _run_log_dir(project_dir)
+    sm = StateMachine(config, project_dir, run_log_dir)
+
+    try:
+        codeforge_run = sm.start_run(run_mode, brief)
+        _save_brief(run_log_dir, codeforge_run.run_id, brief)
+        typer.echo(f"Run started: {codeforge_run.run_id}")
+
+        req_doc, code_art, test_suite = sm.execute(brief, human)
+        typer.echo(f"Codeforge succeeded (run {codeforge_run.run_id})")
+
+        _do_commit(sm, req_doc, code_art, test_suite, config, project_dir)
+
+    except EscalationError as exc:
+        run_id = sm.run.run_id if sm._run else "unknown"
+        typer.echo(f"\nCodeforge escalated: {exc.reason}", err=True)
+        typer.echo(f"Run ID: {run_id}", err=True)
+        typer.echo(
+            f"Review run-logs/{run_id}/events.jsonl for details.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    except Exception as exc:
+        sm.mark_failed_terminal()
+        typer.echo(f"Codeforge failed with unexpected error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    finally:
+        lock.release()
+
+
+@app.command()
+def resume(
+    run_id: str = typer.Argument(help="Run ID to resume (e.g. run-abc123)."),
+    project_dir: Path = typer.Option(
+        ...,
+        "--project-dir",
+        "-d",
+        help="Path to the managed project directory.",
+        show_default=False,
+    ),
+) -> None:
+    """
+    Resume a codeforge run that was interrupted by an escalation.
+
+    Loads the saved CodeforgeRun, presents the pending escalation event to
+    the operator, collects their EscalationResolution, and re-enters the
+    state machine from the chosen reentry state.
+    """
+    config = _load_config_or_exit(project_dir)
+    lock = CodeforgeLock(project_dir)
+    human = HumanInteraction()
+
+    run_log_dir = _run_log_dir(project_dir)
+    run_data = _load_codeforge_run(run_log_dir, run_id)
+
+    try:
+        lock.acquire()
+    except CodeforgeAlreadyRunningError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+    sm = StateMachine(config, project_dir, run_log_dir)
+
+    try:
+        from codeforge.schemas.contracts import CodeforgeRun
+
+        codeforge_run = CodeforgeRun(**run_data)
+
+        # Surface the most recent unresolved escalation so the operator can decide
+        unresolved = [e for e in codeforge_run.escalations if not e.resolved]
+        if unresolved:
+            escalation = unresolved[-1]
+            typer.echo(f"\nResuming run {run_id} — pending escalation:")
+            resolution = human.handle_escalation(escalation)
+
+            if resolution.outcome == "rejected":
+                typer.echo("Escalation rejected — aborting run.", err=True)
+                raise typer.Exit(2)
+
+            escalation.resolved = True
+            escalation.resolution = resolution
+        else:
+            typer.echo(f"Resuming run {run_id} (no pending escalation).")
+
+        sm.resume_run(codeforge_run)
+
+        brief = _load_brief(run_log_dir, run_id)
+        if brief is None:
+            brief = typer.prompt("Brief not found in run logs — please re-enter the brief")
+
+        typer.echo(f"Continuing from last saved state...")
+        req_doc, code_art, test_suite = sm.execute(brief, human)
+        typer.echo(f"Codeforge succeeded (run {run_id})")
+
+        _do_commit(sm, req_doc, code_art, test_suite, config, project_dir)
+
+    except EscalationError as exc:
+        typer.echo(f"\nCodeforge escalated again: {exc.reason}", err=True)
+        typer.echo(f"Review run-logs/{run_id}/events.jsonl for details.", err=True)
+        raise typer.Exit(2)
+
+    except Exception as exc:
+        sm.mark_failed_terminal()
+        typer.echo(f"Codeforge failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+    finally:
+        lock.release()
+
+
+# ---------------------------------------------------------------------------
+# Config loading helper
+# ---------------------------------------------------------------------------
+
+def _load_config_or_exit(project_dir: Path) -> Any:
+    """Load config with full validation; exit with a friendly message on failure."""
+    try:
+        return load_config(
+            project_dir,
+            require_sandbox_image=True,
+            require_repos=True,
+            require_env_vars=True,
+        )
+    except (ValueError, EnvironmentError, FileNotFoundError) as exc:
+        typer.echo(f"Configuration error: {exc}", err=True)
+        raise typer.Exit(1)

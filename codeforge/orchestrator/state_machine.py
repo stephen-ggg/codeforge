@@ -1,7 +1,7 @@
 """
-orchestrator/state_machine.py — Pipeline state machine.
+orchestrator/state_machine.py — Codeforge orchestrator state machine.
 
-Owns the PipelineRun object. Drives the pipeline through all phases.
+Owns the CodeforgeRun object. Drives codeforge through all phases.
 Calls the assembler, model router, validator, routing table, and event log
 in the correct sequence for each phase.
 
@@ -64,13 +64,13 @@ from codeforge.schemas.contracts import (
     ArtifactRef,
     ArtifactType,
     CodeArtifact,
+    CodeforgeRun,
+    CodeforgeStatus,
     CountersSnapshot,
     EscalationEvent,
     EscalationReason,
     HandoffInvocationType,
     LogActor,
-    PipelineRun,
-    PipelineStatus,
     RequirementsDoc,
     RetryCounters,
     ReviewReport,
@@ -93,19 +93,19 @@ def _new_run_id() -> str:
 
 
 class EscalationError(Exception):
-    """Raised when the pipeline must escalate to a human."""
+    """Raised when codeforge must escalate to a human."""
 
     def __init__(self, reason: EscalationReason, context: str = "") -> None:
         self.reason = reason
         self.context = context
-        super().__init__(f"Pipeline escalated: {reason} — {context}")
+        super().__init__(f"Codeforge escalated: {reason} — {context}")
 
 
 class StateMachine:
     """
-    Pipeline orchestrator state machine.
+    Codeforge orchestrator state machine.
 
-    One instance per pipeline run. Not thread-safe — runs sequentially.
+    One instance per codeforge run. Not thread-safe — runs sequentially.
     """
 
     def __init__(
@@ -123,7 +123,7 @@ class StateMachine:
         self._artifact_store = ArtifactStore(run_log_dir)
 
         # Core components (initialised in start_run)
-        self._run: PipelineRun | None = None
+        self._run: CodeforgeRun | None = None
         self._pending: PendingWrites | None = None
         self._event_log: EventLog | None = None
         self._validator: OutputValidator | None = None
@@ -139,9 +139,9 @@ class StateMachine:
         self,
         run_mode: str,
         human_brief: str,
-    ) -> PipelineRun:
+    ) -> CodeforgeRun:
         """
-        Initialise a new PipelineRun and all components.
+        Initialise a new CodeforgeRun and all components.
         Returns the run object — caller can inspect status after execute().
         """
         run_id = _new_run_id()
@@ -150,9 +150,9 @@ class StateMachine:
 
         from typing import Literal as Lit
         run_mode_typed = cast(Lit["new_project", "continuation"], run_mode)
-        self._run = PipelineRun(
+        self._run = CodeforgeRun(
             run_id=run_id,
-            pipeline_version=self._config.pipeline,
+            codeforge_version=self._config.name,
             run_mode=run_mode_typed,
             started_at=_now(),
             status="running",
@@ -162,7 +162,7 @@ class StateMachine:
         )
 
         self._pending = PendingWrites(self._project_state)
-        self._event_log = EventLog(run_log_dir, run_id, self._config.pipeline)
+        self._event_log = EventLog(run_log_dir, run_id, self._config.name)
         self._validator = OutputValidator(self._config.to_dict())
         self._gates = GateEvaluator(self._validator, self._event_log, self._config.to_dict())
         self._router = ModelRouter(self._config)
@@ -179,12 +179,12 @@ class StateMachine:
         self._event_log.update_run_snapshot(self._run)
         return self._run
 
-    def resume_run(self, run: PipelineRun) -> None:
-        """Restore state from a persisted PipelineRun (pipeline resume command)."""
+    def resume_run(self, run: CodeforgeRun) -> None:
+        """Restore state from a persisted CodeforgeRun (codeforge resume command)."""
         self._run = run
         run_log_dir = self._run_log_dir / run.run_id
         self._pending = PendingWrites(self._project_state)
-        self._event_log = EventLog(run_log_dir, run.run_id, self._config.pipeline)
+        self._event_log = EventLog(run_log_dir, run.run_id, self._config.name)
         self._validator = OutputValidator(self._config.to_dict())
         self._gates = GateEvaluator(self._validator, self._event_log, self._config.to_dict())
         self._router = ModelRouter(self._config)
@@ -202,7 +202,7 @@ class StateMachine:
     # ------------------------------------------------------------------
 
     @property
-    def run(self) -> PipelineRun:
+    def run(self) -> CodeforgeRun:
         assert self._run is not None, "start_run() must be called first"
         return self._run
 
@@ -352,7 +352,7 @@ class StateMachine:
             produced_by=typed_agent_id,
             output=output,
             run_id=self.run.run_id,
-            pipeline_version=self._config.pipeline,
+            codeforge_version=self._config.name,
             schema_version="1.0.0",
             allowed_consumers=allowed,
             forbidden_consumers=forbidden,
