@@ -47,6 +47,30 @@ logger = logging.getLogger(__name__)
 
 litellm.suppress_debug_info = True
 
+# Models that do NOT accept a `temperature` parameter.
+# Re-evaluate and re-add temperature support per model as the API evolves.
+#
+# Models that DO accept temperature: claude-opus-4-6 (and earlier Opus versions),
+# claude-sonnet-4-6, claude-haiku-4-5-*, all claude-3-* models.
+#
+# Models that do NOT accept temperature (omitted from requests):
+#   claude-opus-4-7, claude-opus-4-8
+_MODELS_WITHOUT_TEMPERATURE: frozenset[str] = frozenset({
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+})
+
+
+def _supports_temperature(model: str) -> bool:
+    """Return False for models that reject the temperature parameter.
+
+    Checks by substring so provider-prefixed variants (anthropic/claude-opus-4-8,
+    us.anthropic.claude-opus-4-8) are also matched.
+    """
+    m = model.lower()
+    return not any(no_temp in m for no_temp in _MODELS_WITHOUT_TEMPERATURE)
+
+
 # Appended to the user turn ONLY when thinking is configured but the model can't do it
 # natively (non-Anthropic provider). Anthropic models get a real thinking block instead.
 _SCRATCHPAD_INSTRUCTION = (
@@ -214,10 +238,12 @@ class ModelRouter:
             "metadata": metadata,
         }
         if thinking_param is not None:
-            # Anthropic requires temperature == 1 when extended thinking is enabled.
             kwargs["thinking"] = thinking_param
-            kwargs["temperature"] = 1
-        else:
+            # Anthropic requires temperature=1 for extended thinking; omit if model
+            # doesn't accept the parameter at all.
+            if _supports_temperature(model):
+                kwargs["temperature"] = 1
+        elif _supports_temperature(model):
             kwargs["temperature"] = temperature
 
         response = litellm.completion(**kwargs)
