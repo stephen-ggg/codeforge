@@ -41,6 +41,7 @@ class TestDesignerAgent(BaseAgent):
       - feature_registry_md (from state_documents)
       - retry_context (injected on fail_test_bug loop)
       - code_fix_context (injected on fail_code_bug re-entry)
+      - env_fix_context (injected on environment-error auto-recovery re-entry)
 
     CRITICAL: code_artifact must NEVER appear in the payload.
     This method explicitly excludes it and raises a block flag if detected.
@@ -88,6 +89,7 @@ class TestDesignerAgent(BaseAgent):
             "feature_registry_md": state.get("feature_registry", ""),
             "retry_context": json.loads(state.get("_retry_context", "null")),
             "code_fix_context": json.loads(state.get("_code_fix_context", "null")),
+            "env_fix_context": json.loads(state.get("_env_fix_context", "null")),
         }
 
         if reprompt is not None:

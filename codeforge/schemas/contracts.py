@@ -238,6 +238,7 @@ class RetryCounters(BaseModel):
     coder_validation: int = 0
     architecture_validation: int = 0
     infrastructure: int = 0
+    environment_repair: int = 0   # automatic recovery: re-invoke test_designer to fix env/deps
     malformed_output: int = 0
     codeforge_state_commit: int = 0
     source_code_commit: int = 0
@@ -919,6 +920,7 @@ class CountersSnapshot(BaseModel):
     coder_validation: int = 0
     architecture_validation: int = 0
     infrastructure: int = 0
+    environment_repair: int = 0
     malformed_output: int = 0
     codeforge_state_commit: int = 0
     source_code_commit: int = 0

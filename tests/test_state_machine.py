@@ -13,9 +13,16 @@ import pytest
 
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.orchestrator.gates import GateResult
-from codeforge.orchestrator.routing import route_low_confidence
-from codeforge.orchestrator.state_machine import EscalationError, StateMachine
-from codeforge.schemas.contracts import AgentOutput, Flag
+from codeforge.orchestrator.routing import (
+    route_low_confidence,
+    route_test_analysis_recoverable_error,
+)
+from codeforge.orchestrator.state_machine import (
+    EscalationError,
+    StateMachine,
+    _build_env_fix_context,
+)
+from codeforge.schemas.contracts import AgentOutput, FailureAnalysis, Flag, TestAnalysis
 
 
 @pytest.fixture
@@ -193,3 +200,64 @@ def test_low_confidence_detail_includes_confidence(sm: StateMachine, run_log_dir
     assert "confidence=0.1" in gate["detail"]
     assert "uncertain result" in gate["detail"]
     assert gate["artifact_ref"]
+
+
+# ----------------------------------------------------------------------
+# Auto-recovery: environment error routes back to the test_designer
+# ----------------------------------------------------------------------
+
+
+def _environment_analysis() -> TestAnalysis:
+    """A verdict=error analysis shaped like the real run-e92d024fe482 payload."""
+    return TestAnalysis(
+        verdict="error",
+        summary="pytest exited with a fatal argument error before collecting any tests.",
+        failure_analyses=[
+            FailureAnalysis(
+                test_case_id="ALL (no tests collected)",
+                root_cause_hypothesis="environment",
+                confidence=0.99,
+                evidence="pytest stderr: unrecognized arguments --json-report",
+                recommended_action="Add pytest-json-report>=1.5 to requirements-test.txt",
+            )
+        ],
+        coverage_update=[],
+    )
+
+
+def test_build_env_fix_context_is_firewall_safe_projection() -> None:
+    ctx = _build_env_fix_context(_environment_analysis())
+
+    assert ctx["trigger"] == "test_error_environment"
+    assert ctx["test_summary"].startswith("pytest exited")
+    assert len(ctx["environment_findings"]) == 1
+    finding = ctx["environment_findings"][0]
+    # Only the whitelisted fields cross the firewall — no raw artifact, no code.
+    assert set(finding.keys()) == {"recommended_action", "evidence"}
+    assert "pytest-json-report" in finding["recommended_action"]
+    # The raw analysis fields/keys must NOT leak through.
+    assert "root_cause_hypothesis" not in finding
+    assert "verdict" not in ctx
+    assert "code_artifact" not in json.dumps(ctx)
+
+
+def test_environment_error_recovers_to_test_design_and_counts(sm: StateMachine) -> None:
+    analysis = _environment_analysis()
+
+    recovery = route_test_analysis_recoverable_error(
+        analysis, sm.run.retry_counters, sm._config.to_dict()
+    )
+    assert recovery is not None and recovery.next_state == "test_design"
+
+    # Applying the outcome increments the dedicated recovery budget (not infrastructure).
+    sm._apply_outcome(recovery)
+    assert sm.run.retry_counters.environment_repair == 1
+    assert sm.run.retry_counters.infrastructure == 0
+
+    # The routing decision is logged for observability.
+    routing = [
+        json.loads(line)
+        for line in (sm._run_log_dir / sm.run.run_id / "events.jsonl").read_text().splitlines()
+        if json.loads(line).get("event_type") == "routing"
+    ]
+    assert routing[-1]["routing_table_row"] == "test_analysis_environment_repair"

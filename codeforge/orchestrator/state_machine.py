@@ -58,6 +58,7 @@ from codeforge.orchestrator.routing import (
     route_test_analysis_spec_gap,
     route_test_analysis_ambiguous,
     route_test_analysis_error,
+    route_test_analysis_recoverable_error,
 )
 from codeforge.orchestrator.state_writer import flush_pending_writes
 from codeforge.schemas.contracts import (
@@ -991,6 +992,7 @@ class StateMachine:
         system_prompt: str,
         code_fix_context: dict[str, Any] | None = None,
         retry_context: dict[str, Any] | None = None,
+        env_fix_context: dict[str, Any] | None = None,
     ) -> TestSuite:
         """Drive test design to completion."""
         self._current_phase = "test_design"
@@ -1012,6 +1014,7 @@ class StateMachine:
             # Inject orchestrator-managed fields for build_user_turn()
             pkg.state_documents["_code_fix_context"] = json.dumps(code_fix_context)
             pkg.state_documents["_retry_context"] = json.dumps(retry_context)
+            pkg.state_documents["_env_fix_context"] = json.dumps(env_fix_context)
 
             user_turn = TestDesignerAgent(
                 "test_designer", self.router, self._config
@@ -1214,6 +1217,7 @@ class StateMachine:
 
         spec_gap_context: dict[str, Any] | None = None
         code_fix_context: dict[str, Any] | None = None
+        env_fix_context: dict[str, Any] | None = None
         req_doc: RequirementsDoc | None = None
         arch_doc: ArchitectureDoc | None = None
         code_art: CodeArtifact | None = None
@@ -1277,8 +1281,10 @@ class StateMachine:
                 test_suite = self.run_test_design(
                     req_doc, arch_doc, prompts["test_designer"],
                     code_fix_context=code_fix_context,
+                    env_fix_context=env_fix_context,
                 )
                 code_fix_context = None  # consumed; clear after test design completes
+                env_fix_context = None   # consumed; clear after test design completes
                 next_state = "test_execution"
 
             elif next_state == "test_execution":
@@ -1387,13 +1393,25 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "human_required")
 
                 else:  # "error"
-                    outcome = route_test_analysis_error(
-                        self.run.retry_counters, self._config.to_dict()
+                    cfg = self._config.to_dict()
+                    # First try to auto-recover: route the failure back to the agent
+                    # that can fix it (e.g. test_designer for an environment/dep error)
+                    # before falling back to re-running the runner / escalating.
+                    recovery = route_test_analysis_recoverable_error(
+                        analysis, self.run.retry_counters, cfg
                     )
-                    self._apply_outcome(outcome)
-                    if outcome.decision == "escalate":
-                        self._escalate(outcome.escalation_reason or "human_required")
-                    next_state = "test_execution"
+                    if recovery is not None:
+                        self._apply_outcome(recovery)
+                        if recovery.decision == "escalate":
+                            self._escalate(recovery.escalation_reason or "human_required")
+                        env_fix_context = _build_env_fix_context(analysis)
+                        next_state = recovery.next_state   # "test_design"
+                    else:
+                        outcome = route_test_analysis_error(self.run.retry_counters, cfg)
+                        self._apply_outcome(outcome)
+                        if outcome.decision == "escalate":
+                            self._escalate(outcome.escalation_reason or "human_required")
+                        next_state = "test_execution"
 
         self.run_commit()
         assert code_art is not None
@@ -1515,3 +1533,27 @@ def _build_spec_gap_context(analysis: "TestAnalysis") -> dict[str, Any]:
         "failure_analyses": [fa.model_dump() for fa in analysis.failure_analyses],
     }
     return result
+
+
+def _build_env_fix_context(analysis: "TestAnalysis") -> dict[str, Any]:
+    """
+    Build the env_fix_context dict passed back to the test_designer to repair an
+    environment failure (e.g. a missing test-only dependency in requirements-test.txt).
+
+    Firewall-safe whitelist projection — the test_designer is forbidden the raw
+    test_analysis artifact, so only the analyst summary and the recommended_action /
+    evidence of environment-classified failures cross over. Never the raw artifact,
+    never any code.
+    """
+    return {
+        "trigger": "test_error_environment",
+        "test_summary": analysis.summary,
+        "environment_findings": [
+            {
+                "recommended_action": fa.recommended_action,
+                "evidence": fa.evidence,
+            }
+            for fa in analysis.failure_analyses
+            if fa.root_cause_hypothesis == "environment"
+        ],
+    }

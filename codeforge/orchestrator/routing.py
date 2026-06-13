@@ -536,6 +536,90 @@ def route_test_analysis_error(
 
 
 # ---------------------------------------------------------------------------
+# Automatic recovery: route a recoverable `error` verdict back to the agent that
+# can actually fix it, before escalating to a human.
+#
+# This is a data-driven table so future recoverable root causes can re-enter at
+# different points without new branching. Each route names the re-entry state,
+# the dedicated retry counter, and the config limit key.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RecoveryRoute:
+    """A recoverable root cause's re-entry target and budget."""
+    reentry_state: str
+    counter: str
+    limit_key: str
+    row_id: str
+
+
+_RECOVERY_ROUTES: dict[str, RecoveryRoute] = {
+    # An environment failure (e.g. a missing test-only dependency in
+    # requirements-test.txt) is fixable by the test_designer, which owns
+    # test_infrastructure. Re-enter test_design with a projected env_fix_context.
+    "environment": RecoveryRoute(
+        reentry_state="test_design",
+        counter="environment_repair",
+        limit_key="environment_repair",
+        row_id="test_analysis_environment_repair",
+    ),
+}
+
+
+def _dominant_recoverable_cause(analysis: TestAnalysis) -> str | None:
+    """
+    Pick the recoverable root cause to act on for a verdict=error analysis.
+
+    Returns a key into _RECOVERY_ROUTES, or None if the failure isn't
+    auto-recoverable (no mapped cause, or a code_bug/spec_gap is mixed in — those
+    would have changed the verdict upstream and are not ours to silently repair).
+    """
+    causes = {fa.root_cause_hypothesis for fa in analysis.failure_analyses}
+    if causes & {"code_bug", "spec_gap"}:
+        return None
+    for cause in causes:
+        if cause in _RECOVERY_ROUTES:
+            return cause
+    return None
+
+
+def route_test_analysis_recoverable_error(
+    analysis: TestAnalysis,
+    counters: RetryCounters,
+    config: dict[str, Any],
+) -> RoutingOutcome | None:
+    """
+    Attempt to route a recoverable `error` verdict back to a fixing agent.
+
+    Returns a recovery RoutingOutcome (re-entry while in budget, else escalate),
+    or None when the failure isn't auto-recoverable — in which case the caller
+    falls back to route_test_analysis_error (re-run the runner / escalate).
+    """
+    cause = _dominant_recoverable_cause(analysis)
+    route = _RECOVERY_ROUTES.get(cause) if cause else None
+    if route is None:
+        return None
+
+    limit = _get_limit(config, route.limit_key, 2)
+    if _within_budget(getattr(counters, route.counter), limit):
+        return RoutingOutcome(
+            row_id=route.row_id,
+            decision="retry_same_agent",
+            next_state=route.reentry_state,
+            counter_deltas={route.counter: 1},
+            extra={"recovery_root_cause": cause},
+        )
+    return RoutingOutcome(
+        row_id=f"{route.row_id}_exhausted",
+        decision="escalate",
+        next_state="failed_escalated",
+        counter_deltas={route.counter: 1},
+        escalation_reason="human_required",
+        extra={"recovery_root_cause": cause},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Commit
 # ---------------------------------------------------------------------------
 

@@ -53,6 +53,11 @@ offending ids. Do not invent criterion ids.
 - **`code_fix_context`** (fail_code_bug) — the code was fixed for `flagged_criterion_ids`.
   Review the tests for those ACs and revise them only if needed to exercise the fixed
   behaviour. Leave all other tests unchanged.
+- **`env_fix_context`** (test_error_environment) — the test run failed on the environment,
+  not on any feature behaviour (e.g. a missing test-only dependency). Apply each
+  `recommended_action` to your `test_infrastructure` only — typically add the named
+  dependency to `requirements-test.txt`. Do NOT change any `test_cases` or the
+  `coverage_map`; keep every other output byte-for-byte stable.
 
 ## Re-prompt handling
 
