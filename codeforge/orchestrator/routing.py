@@ -34,7 +34,6 @@ from codeforge.schemas.contracts import (
     ReviewReport,
     RoutingDecision,
     SecurityReport,
-    TestAnalysis,
     ArchitectureDoc,
     TestSuite,
 )
@@ -51,6 +50,8 @@ class RoutingOutcome:
     escalation_reason: EscalationReason | None = None
     # Structured context for the state machine to act on
     extra: dict[str, Any] = field(default_factory=dict)
+    # Human-readable context persisted to the routing event log line (optional)
+    detail: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +117,34 @@ def route_low_confidence(agent_id: str) -> RoutingOutcome:
     """Policy stage: confidence below threshold."""
     return RoutingOutcome(
         row_id="low_confidence",
+        decision="escalate",
+        next_state="failed_escalated",
+        escalation_reason="low_confidence",
+        extra={"agent_id": agent_id},
+    )
+
+
+def route_low_confidence_reprompt(
+    agent_id: str,
+    counters: RetryCounters,
+    config: dict[str, Any],
+) -> RoutingOutcome:
+    """
+    Policy stage: confidence below threshold — re-prompt the same agent once (a 'be more
+    thorough' nudge) before escalating. Returns a re-prompt outcome while within budget,
+    else the terminal low_confidence escalation.
+    """
+    limit = _get_limit(config, "low_confidence_reprompt", 1)
+    if _within_budget(counters.low_confidence_reprompt, limit):
+        return RoutingOutcome(
+            row_id="low_confidence_reprompt",
+            decision="re_prompt_same_agent",
+            next_state=f"{agent_id}_reprompt",
+            counter_deltas={"low_confidence_reprompt": 1},
+            extra={"agent_id": agent_id},
+        )
+    return RoutingOutcome(
+        row_id="low_confidence_reprompt_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         escalation_reason="low_confidence",
@@ -553,53 +582,41 @@ class RecoveryRoute:
     row_id: str
 
 
+# Keyed on the runner's deterministic error_phase (TestRunnerResults.error_phase) — far more
+# reliable than the analyst's free-text root_cause_hypothesis, and it tells us which agent owns
+# the fix. Runtime-dependency failures go to the coder (owns requirements.txt); test-infra
+# failures go to the test_designer (owns test_infrastructure / requirements-test.txt).
 _RECOVERY_ROUTES: dict[str, RecoveryRoute] = {
-    # An environment failure (e.g. a missing test-only dependency in
-    # requirements-test.txt) is fixable by the test_designer, which owns
-    # test_infrastructure. Re-enter test_design with a projected env_fix_context.
-    "environment": RecoveryRoute(
-        reentry_state="test_design",
-        counter="environment_repair",
-        limit_key="environment_repair",
-        row_id="test_analysis_environment_repair",
-    ),
+    "missing_requirements_txt": RecoveryRoute(
+        "coding", "dependency_repair", "dependency_repair", "test_error_runtime_dep_repair"),
+    "runtime_dep_install_failed": RecoveryRoute(
+        "coding", "dependency_repair", "dependency_repair", "test_error_runtime_dep_repair"),
+    "no_results_json": RecoveryRoute(
+        "test_design", "environment_repair", "environment_repair", "test_error_test_infra_repair"),
+    "pytest_exit_error": RecoveryRoute(
+        "test_design", "environment_repair", "environment_repair", "test_error_test_infra_repair"),
+    # results_parse_error: transient/corrupt — no route; fall back to runner retry / escalate.
 }
 
 
-def _dominant_recoverable_cause(analysis: TestAnalysis) -> str | None:
-    """
-    Pick the recoverable root cause to act on for a verdict=error analysis.
-
-    Returns a key into _RECOVERY_ROUTES, or None if the failure isn't
-    auto-recoverable (no mapped cause, or a code_bug/spec_gap is mixed in — those
-    would have changed the verdict upstream and are not ours to silently repair).
-    """
-    causes = {fa.root_cause_hypothesis for fa in analysis.failure_analyses}
-    if causes & {"code_bug", "spec_gap"}:
-        return None
-    for cause in causes:
-        if cause in _RECOVERY_ROUTES:
-            return cause
-    return None
-
-
 def route_test_analysis_recoverable_error(
-    analysis: TestAnalysis,
+    error_phase: str | None,
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome | None:
     """
-    Attempt to route a recoverable `error` verdict back to a fixing agent.
+    Attempt to route a recoverable `error` verdict back to the agent that owns the fix,
+    based on the runner's deterministic error_phase.
 
-    Returns a recovery RoutingOutcome (re-entry while in budget, else escalate),
-    or None when the failure isn't auto-recoverable — in which case the caller
-    falls back to route_test_analysis_error (re-run the runner / escalate).
+    Returns a recovery RoutingOutcome (re-entry while in budget, else escalate), or None
+    when the phase isn't auto-recoverable — in which case the caller falls back to
+    route_test_analysis_error (re-run the runner / escalate).
     """
-    cause = _dominant_recoverable_cause(analysis)
-    route = _RECOVERY_ROUTES.get(cause) if cause else None
+    route = _RECOVERY_ROUTES.get(error_phase) if error_phase else None
     if route is None:
         return None
 
+    base_detail = f"error_phase={error_phase}"
     limit = _get_limit(config, route.limit_key, 2)
     if _within_budget(getattr(counters, route.counter), limit):
         return RoutingOutcome(
@@ -607,7 +624,8 @@ def route_test_analysis_recoverable_error(
             decision="retry_same_agent",
             next_state=route.reentry_state,
             counter_deltas={route.counter: 1},
-            extra={"recovery_root_cause": cause},
+            extra={"error_phase": error_phase},
+            detail=base_detail,
         )
     return RoutingOutcome(
         row_id=f"{route.row_id}_exhausted",
@@ -615,7 +633,8 @@ def route_test_analysis_recoverable_error(
         next_state="failed_escalated",
         counter_deltas={route.counter: 1},
         escalation_reason="human_required",
-        extra={"recovery_root_cause": cause},
+        extra={"error_phase": error_phase},
+        detail=f"{base_detail} (budget exhausted)",
     )
 
 

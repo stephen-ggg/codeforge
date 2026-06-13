@@ -20,9 +20,17 @@ from codeforge.orchestrator.routing import (
 from codeforge.orchestrator.state_machine import (
     EscalationError,
     StateMachine,
+    _build_dep_fix_context,
     _build_env_fix_context,
 )
-from codeforge.schemas.contracts import AgentOutput, FailureAnalysis, Flag, TestAnalysis
+from codeforge.schemas.contracts import (
+    AgentOutput,
+    FailureAnalysis,
+    Flag,
+    LowConfidenceRePrompt,
+    TestAnalysis,
+    TestRunnerResults,
+)
 
 
 @pytest.fixture
@@ -176,22 +184,47 @@ def test_format_policy_detail_without_summary(sm: StateMachine) -> None:
     assert "summary=" not in detail
 
 
-def test_low_confidence_detail_includes_confidence(sm: StateMachine, run_log_dir: Path) -> None:
-    output = AgentOutput(
+def _low_conf_gate_result() -> GateResult:
+    gr = GateResult()
+    gr.policy_passed = False
+    gr.escalation_reason = "low_confidence"
+    gr.policy_gate_rule = "confidence_threshold"
+    gr.parsed_output = AgentOutput(
         output={"verdict": "error", "summary": "uncertain result"},
         assumptions_made=[],
         confidence=0.10,
         unresolved_flags=[],
     )
-    gr = GateResult()
-    gr.policy_passed = False
-    gr.escalation_reason = "low_confidence"
-    gr.policy_gate_rule = "confidence_threshold"
-    gr.parsed_output = output
+    return gr
+
+
+def test_low_confidence_reprompts_once_before_escalating(sm: StateMachine, run_log_dir: Path) -> None:
+    # In budget: a low-confidence gate failure re-prompts (no escalation), increments the
+    # dedicated counter, and returns a LowConfidenceRePrompt for the caller to retry with.
+    reprompt = sm._handle_policy_escalation(
+        _low_conf_gate_result(), "test_analyst", "test_analysis",
+        route_low_confidence("test_analyst"),
+    )
+    assert isinstance(reprompt, LowConfidenceRePrompt)
+    assert reprompt.reason == "low_confidence"
+    assert sm.run.retry_counters.low_confidence_reprompt == 1
+
+    gate = _gate_events(run_log_dir, sm.run.run_id)[-1]
+    assert gate["rule"] == "confidence_threshold"
+    assert "re-prompting" in gate["detail"]
+    assert gate["artifact_ref"] is None  # not terminal -> not persisted
+
+
+def test_low_confidence_escalates_when_reprompt_budget_exhausted(
+    sm: StateMachine, run_log_dir: Path
+) -> None:
+    # Pre-exhaust the one-shot re-prompt budget so the next low-confidence failure is terminal.
+    sm.run.retry_counters.low_confidence_reprompt = 1
 
     with pytest.raises(EscalationError) as exc:
         sm._handle_policy_escalation(
-            gr, "test_analyst", "test_analysis", route_low_confidence("test_analyst")
+            _low_conf_gate_result(), "test_analyst", "test_analysis",
+            route_low_confidence("test_analyst"),
         )
     assert exc.value.reason == "low_confidence"
 
@@ -199,7 +232,7 @@ def test_low_confidence_detail_includes_confidence(sm: StateMachine, run_log_dir
     assert gate["rule"] == "confidence_threshold"
     assert "confidence=0.1" in gate["detail"]
     assert "uncertain result" in gate["detail"]
-    assert gate["artifact_ref"]
+    assert gate["artifact_ref"]  # terminal -> persisted + linked
 
 
 # ----------------------------------------------------------------------
@@ -241,23 +274,47 @@ def test_build_env_fix_context_is_firewall_safe_projection() -> None:
     assert "code_artifact" not in json.dumps(ctx)
 
 
-def test_environment_error_recovers_to_test_design_and_counts(sm: StateMachine) -> None:
-    analysis = _environment_analysis()
-
-    recovery = route_test_analysis_recoverable_error(
-        analysis, sm.run.retry_counters, sm._config.to_dict()
-    )
-    assert recovery is not None and recovery.next_state == "test_design"
-
-    # Applying the outcome increments the dedicated recovery budget (not infrastructure).
-    sm._apply_outcome(recovery)
-    assert sm.run.retry_counters.environment_repair == 1
-    assert sm.run.retry_counters.infrastructure == 0
-
-    # The routing decision is logged for observability.
-    routing = [
+def _routing_events(sm: StateMachine) -> list[dict]:
+    return [
         json.loads(line)
         for line in (sm._run_log_dir / sm.run.run_id / "events.jsonl").read_text().splitlines()
         if json.loads(line).get("event_type") == "routing"
     ]
-    assert routing[-1]["routing_table_row"] == "test_analysis_environment_repair"
+
+
+def test_test_infra_error_recovers_to_test_design_and_counts(sm: StateMachine) -> None:
+    recovery = route_test_analysis_recoverable_error(
+        "no_results_json", sm.run.retry_counters, sm._config.to_dict()
+    )
+    assert recovery is not None and recovery.next_state == "test_design"
+
+    sm._apply_outcome(recovery)
+    assert sm.run.retry_counters.environment_repair == 1
+    assert sm.run.retry_counters.infrastructure == 0
+
+    routing = _routing_events(sm)
+    assert routing[-1]["routing_table_row"] == "test_error_test_infra_repair"
+    assert "error_phase=no_results_json" in routing[-1]["detail"]
+
+
+def test_runtime_dep_error_recovers_to_coding_with_dep_context(sm: StateMachine) -> None:
+    recovery = route_test_analysis_recoverable_error(
+        "runtime_dep_install_failed", sm.run.retry_counters, sm._config.to_dict()
+    )
+    assert recovery is not None
+    assert recovery.next_state == "coding"
+
+    sm._apply_outcome(recovery)
+    assert sm.run.retry_counters.dependency_repair == 1
+    assert _routing_events(sm)[-1]["routing_table_row"] == "test_error_runtime_dep_repair"
+
+    # The coder fix context carries the runner's own stderr (no firewall projection needed).
+    runner_results = TestRunnerResults(
+        run_id="r1", started_at="t", completed_at="t", overall_status="error",
+        test_results=[], environment_info={}, stdout_tail="",
+        stderr_tail="ERROR: No matching distribution found for leftpad==9.9",
+        error_phase="runtime_dep_install_failed",
+    )
+    ctx = _build_dep_fix_context(runner_results)
+    assert ctx["trigger"] == "runtime_dep_error"
+    assert "leftpad" in ctx["stderr_tail"]

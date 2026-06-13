@@ -238,7 +238,9 @@ class RetryCounters(BaseModel):
     coder_validation: int = 0
     architecture_validation: int = 0
     infrastructure: int = 0
-    environment_repair: int = 0   # automatic recovery: re-invoke test_designer to fix env/deps
+    environment_repair: int = 0   # auto-recovery: re-invoke test_designer to fix test infra/deps
+    dependency_repair: int = 0    # auto-recovery: re-invoke coder to fix runtime requirements.txt
+    low_confidence_reprompt: int = 0  # one-shot re-prompt of an agent before low-confidence escalate
     malformed_output: int = 0
     codeforge_state_commit: int = 0
     source_code_commit: int = 0
@@ -292,8 +294,17 @@ class ContractViolationRePrompt(BaseModel):
     missing_requirements_txt: bool | None = None
 
 
+class LowConfidenceRePrompt(BaseModel):
+    """Policy-stage re-prompt: agent confidence below threshold — one nudge before escalating."""
+    reason: Literal["low_confidence"] = "low_confidence"
+    prior_confidence: float
+    threshold: float
+    attempt_number: int
+    max_attempts: int                       # from config: low_confidence_reprompt
+
+
 # Union type for re-prompt context
-RePromptContext = Union[MalformedOutputRePrompt, ContractViolationRePrompt]
+RePromptContext = Union[MalformedOutputRePrompt, ContractViolationRePrompt, LowConfidenceRePrompt]
 
 
 # ---------------------------------------------------------------------------
@@ -722,6 +733,18 @@ class TestResult(BaseModel):
     failed_assertions: list[FailedAssertion] | None = None
 
 
+# Deterministic classification of an overall_status="error" — which sandbox step failed.
+# Drives auto-recovery routing (which agent owns the fix) far more reliably than the
+# test_analyst's free-text root_cause_hypothesis.
+TestRunnerErrorPhase = Literal[
+    "missing_requirements_txt",     # code_artifact had no requirements.txt        → coder
+    "runtime_dep_install_failed",   # pip install -r requirements.txt failed        → coder
+    "no_results_json",              # pytest produced no results.json (e.g. missing plugin) → test_designer
+    "results_parse_error",          # results.json was not valid JSON               → (transient)
+    "pytest_exit_error",            # pytest exited with a non-0/1 code             → test_designer
+]
+
+
 class TestRunnerResults(BaseModel):
     run_id: str
     started_at: str                         # ISO 8601
@@ -731,6 +754,7 @@ class TestRunnerResults(BaseModel):
     environment_info: dict[str, str]        # {sandbox_image, runtime_version}
     stdout_tail: str
     stderr_tail: str
+    error_phase: TestRunnerErrorPhase | None = None  # set only when overall_status == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -921,6 +945,8 @@ class CountersSnapshot(BaseModel):
     architecture_validation: int = 0
     infrastructure: int = 0
     environment_repair: int = 0
+    dependency_repair: int = 0
+    low_confidence_reprompt: int = 0
     malformed_output: int = 0
     codeforge_state_commit: int = 0
     source_code_commit: int = 0
@@ -945,7 +971,7 @@ class HandoffEvent(OrchestratorEventBase):
     assembly_id: str | None = None
     context_package_ref: str | None = None
     stripped_fields: list[str] = Field(default_factory=list)
-    reprompt_reason: Literal["malformed_output", "contract_violation"] | None = None
+    reprompt_reason: Literal["malformed_output", "contract_violation", "low_confidence"] | None = None
     litellm_call_id: str | None = None
 
 
@@ -965,6 +991,7 @@ class RoutingEvent(OrchestratorEventBase):
     counter_deltas: dict[str, int] = Field(default_factory=dict)
     counter_resets: list[str] = Field(default_factory=list)
     next_state: str
+    detail: str = ""                        # human-readable context (e.g. error_phase + stderr) — optional
 
 
 class StateWriteEvent(OrchestratorEventBase):

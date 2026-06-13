@@ -45,6 +45,11 @@ doc specifies in its `contract` — that path is the contract the tests will imp
   Fix the behaviour. You will not see the test code and must not try to infer or reference it.
 - **`code_fix_context`** — a code fix for `flagged_criterion_ids` passed review and is now
   back for the test phase. Focus your changes on those ACs.
+- **`dep_fix_context`** (trigger `runtime_dep_error`) — the test run never started: installing
+  `requirements.txt` failed. Read `stderr_tail` and fix `requirements.txt` accordingly (add the
+  missing package, correct a bad/incompatible version/name). Change only `requirements.txt` —
+  leave feature logic untouched unless the stderr shows your code imports a package you forgot to
+  declare.
 
 ## Code quality
 

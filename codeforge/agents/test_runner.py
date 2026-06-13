@@ -35,6 +35,7 @@ from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.schemas.contracts import (
     CodeArtifact,
     TestResult,
+    TestRunnerErrorPhase,
     TestRunnerInput,
     TestRunnerResults,
     TestSuite,
@@ -64,7 +65,7 @@ class TestRunner:
         has_req = any(f.path == "requirements.txt" for f in input.code_artifact.files)
         if not has_req:
             return _error_result(
-                started_at, sandbox_image,
+                started_at, sandbox_image, "missing_requirements_txt",
                 stderr="Missing requirements.txt in code_artifact",
             )
 
@@ -101,7 +102,7 @@ class TestRunner:
             )
             if exit_code != 0:
                 return _error_result(
-                    started_at, sandbox_image,
+                    started_at, sandbox_image, "runtime_dep_install_failed",
                     stderr=_decode(out)[-4096:],
                 )
 
@@ -124,7 +125,7 @@ class TestRunner:
 
             if results_raw is None:
                 return _error_result(
-                    started_at, sandbox_image,
+                    started_at, sandbox_image, "no_results_json",
                     stdout=pytest_stdout[-4096:],
                     stderr="pytest did not produce results.json",
                 )
@@ -231,7 +232,7 @@ def _parse_pytest_report(
         data = json.loads(results_raw)
     except json.JSONDecodeError:
         return _error_result(
-            started_at, sandbox_image,
+            started_at, sandbox_image, "results_parse_error",
             stdout=pytest_stdout[-4096:],
             stderr="Failed to parse results.json as JSON",
         )
@@ -289,12 +290,14 @@ def _parse_pytest_report(
         ))
 
     exit_code: int = data.get("exitcode", 1)
+    error_phase: TestRunnerErrorPhase | None = None
     if exit_code == 0:
         overall_status: Literal["pass", "fail", "error"] = "pass"
     elif exit_code == 1:
         overall_status = "fail"
     else:
         overall_status = "error"
+        error_phase = "pytest_exit_error"
 
     env = data.get("environment", {})
     runtime_version = env.get("Python", env.get("python", ""))
@@ -308,12 +311,14 @@ def _parse_pytest_report(
         environment_info={"sandbox_image": sandbox_image, "runtime_version": runtime_version},
         stdout_tail=pytest_stdout[-4096:],
         stderr_tail="",
+        error_phase=error_phase,
     )
 
 
 def _error_result(
     started_at: str,
     sandbox_image: str,
+    error_phase: "TestRunnerErrorPhase",
     stdout: str = "",
     stderr: str = "",
 ) -> TestRunnerResults:
@@ -326,6 +331,7 @@ def _error_result(
         environment_info={"sandbox_image": sandbox_image, "runtime_version": ""},
         stdout_tail=stdout,
         stderr_tail=stderr,
+        error_phase=error_phase,
     )
 
 

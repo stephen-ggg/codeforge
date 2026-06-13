@@ -19,7 +19,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import Any, cast
 
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.firewall.assembler import ContextAssembler
@@ -35,6 +35,7 @@ from codeforge.orchestrator.routing import (
     route_block_flag,
     route_ceiling_exceeded,
     route_low_confidence,
+    route_low_confidence_reprompt,
     route_requirements_clarify,
     route_requirements_complete,
     route_requirements_confirmed,
@@ -73,6 +74,7 @@ from codeforge.schemas.contracts import (
     EscalationReason,
     HandoffInvocationType,
     LogActor,
+    LowConfidenceRePrompt,
     RePromptContext,
     RequirementsDoc,
     RetryCounters,
@@ -260,6 +262,7 @@ class StateMachine:
             counters=self._counters_snap(),
             counter_deltas=outcome.counter_deltas,
             counter_resets=outcome.counter_resets,
+            detail=outcome.detail,
         )
         self.event_log.update_run_snapshot(self.run)
 
@@ -366,7 +369,7 @@ class StateMachine:
         )
 
     # ------------------------------------------------------------------
-    # Terminal policy escalation (block flag / low confidence)
+    # Policy gate failure handling (block flag / low confidence)
     # ------------------------------------------------------------------
 
     def _handle_policy_escalation(
@@ -375,19 +378,57 @@ class StateMachine:
         agent_id: str,
         artifact_type: str,
         low_confidence_outcome: RoutingOutcome,
-    ) -> NoReturn:
+    ) -> RePromptContext:
         """
-        Persist the offending output, emit a richly-detailed failing gate event linked
-        to it, then escalate. Shared by all agent phases for block_flag / low_confidence.
+        Handle a terminal policy gate failure for an agent phase.
 
-        The output is written to the ISOLATED failed-artifacts area (not artifacts/) so
-        it never leaks into get_latest/exists — the assembler and resume must not pick up
-        a blocked output as if it were valid. The only links to it are the gate event's
-        artifact_ref and the escalation's agent_output_ref.
+        - block_flag → always terminal: persist the output + emit a linked failing gate +
+          escalate (raises).
+        - low_confidence → one re-prompt (a 'be more thorough' nudge) before escalating.
+          While in budget, returns a LowConfidenceRePrompt for the caller to re-prompt with
+          (no artifact persisted — it's not terminal). Once exhausted, behaves like block_flag.
+
+        On every terminal path the output is written to the ISOLATED failed-artifacts area
+        (never artifacts/) so it can't leak into get_latest/exists; the only links to it are
+        the gate event's artifact_ref and the escalation's agent_output_ref. This method
+        returns only on the re-prompt path; all terminal paths raise EscalationError.
         """
         output = gate_result.parsed_output
         assert output is not None  # always set by GateEvaluator on a policy failure
 
+        # Low confidence: try one re-prompt before escalating.
+        if gate_result.escalation_reason == "low_confidence":
+            cfg = self._config.to_dict()
+            reprompt_outcome = route_low_confidence_reprompt(
+                agent_id, self.run.retry_counters, cfg
+            )
+            if reprompt_outcome.decision == "re_prompt_same_agent":
+                threshold = float(cfg.get("confidence_thresholds", {}).get(agent_id, 0.0))
+                limit = int(cfg.get("retry_limits", {}).get("low_confidence_reprompt", 1))
+                attempt = self.run.retry_counters.low_confidence_reprompt + 1
+                reprompt_outcome.detail = (
+                    f"prior_confidence={output.confidence} threshold={threshold} "
+                    f"(re-prompt {attempt}/{limit})"
+                )
+                # Log the gate failure + the fact that we're re-prompting (not persisted —
+                # this output is not terminal).
+                self.event_log.emit_gate(
+                    rule=gate_result.policy_gate_rule,  # type: ignore[arg-type]
+                    passed=False,
+                    source_agent=cast(LogActor, agent_id),
+                    counters=self._counters_snap(),
+                    detail=self._format_policy_detail(gate_result, output) + " | re-prompting",
+                )
+                self._apply_outcome(reprompt_outcome)
+                return LowConfidenceRePrompt(
+                    prior_confidence=output.confidence,
+                    threshold=threshold,
+                    attempt_number=attempt,
+                    max_attempts=limit,
+                )
+            # budget exhausted → fall through to terminal escalation below
+
+        # Terminal: persist the offending output, emit a linked failing gate, escalate.
         artifact_id = self._write_failed_artifact(artifact_type, agent_id, output)
         self.event_log.emit_gate(
             rule=gate_result.policy_gate_rule,  # type: ignore[arg-type]
@@ -545,10 +586,11 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                self._handle_policy_escalation(
+                reprompt = self._handle_policy_escalation(
                     gate_result, "requirements_analyst", "requirements_doc",
                     route_low_confidence("requirements_analyst"),
                 )
+                continue
 
             # Parse output
             data = json.loads(raw)
@@ -661,10 +703,11 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                self._handle_policy_escalation(
+                reprompt = self._handle_policy_escalation(
                     gate_result, "architecture_designer", "architecture_doc",
                     route_architecture_lowconf(),
                 )
+                continue
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -738,6 +781,7 @@ class StateMachine:
         retry_context: dict[str, Any] | None = None,
         code_fix_context: dict[str, Any] | None = None,
         entry_stripped_fields: list[str] | None = None,
+        dep_fix_context: dict[str, Any] | None = None,
     ) -> CodeArtifact:
         """Drive coding to completion."""
         self._current_phase = "coding"
@@ -755,6 +799,7 @@ class StateMachine:
             pkg.state_documents["_existing_interfaces"] = json.dumps([])
             pkg.state_documents["_retry_context"] = json.dumps(retry_context)
             pkg.state_documents["_code_fix_context"] = json.dumps(code_fix_context)
+            pkg.state_documents["_dep_fix_context"] = json.dumps(dep_fix_context)
 
             user_turn = CoderAgent(
                 "coder", self.router, self._config
@@ -802,10 +847,11 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                self._handle_policy_escalation(
+                reprompt = self._handle_policy_escalation(
                     gate_result, "coder", "code_artifact",
                     route_low_confidence("coder"),
                 )
+                continue
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -869,10 +915,11 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                self._handle_policy_escalation(
+                reprompt = self._handle_policy_escalation(
                     gate_result, "code_reviewer", "review_report",
                     route_low_confidence("code_reviewer"),
                 )
+                continue
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -950,10 +997,11 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                self._handle_policy_escalation(
+                reprompt = self._handle_policy_escalation(
                     gate_result, "security_reviewer", "security_report",
                     route_low_confidence("security_reviewer"),
                 )
+                continue
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -1054,10 +1102,11 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                self._handle_policy_escalation(
+                reprompt = self._handle_policy_escalation(
                     gate_result, "test_designer", "test_suite",
                     route_low_confidence("test_designer"),
                 )
+                continue
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -1125,10 +1174,11 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                self._handle_policy_escalation(
+                reprompt = self._handle_policy_escalation(
                     gate_result, "test_analyst", "test_analysis",
                     route_low_confidence("test_analyst"),
                 )
+                continue
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -1218,6 +1268,7 @@ class StateMachine:
         spec_gap_context: dict[str, Any] | None = None
         code_fix_context: dict[str, Any] | None = None
         env_fix_context: dict[str, Any] | None = None
+        dep_fix_context: dict[str, Any] | None = None
         req_doc: RequirementsDoc | None = None
         arch_doc: ArchitectureDoc | None = None
         code_art: CodeArtifact | None = None
@@ -1272,8 +1323,10 @@ class StateMachine:
             elif next_state == "coding":
                 assert arch_doc is not None
                 code_art = self._run_impl_with_reviews(
-                    req_doc, arch_doc, prompts, human_interface, code_fix_context
+                    req_doc, arch_doc, prompts, human_interface, code_fix_context,
+                    dep_fix_context=dep_fix_context,
                 )
+                dep_fix_context = None  # consumed; clear after coding completes
                 next_state = "test_design"
 
             elif next_state == "test_design":
@@ -1394,18 +1447,27 @@ class StateMachine:
 
                 else:  # "error"
                     cfg = self._config.to_dict()
-                    # First try to auto-recover: route the failure back to the agent
-                    # that can fix it (e.g. test_designer for an environment/dep error)
-                    # before falling back to re-running the runner / escalating.
+                    # Auto-recover off the runner's deterministic error_phase: route the
+                    # failure to the agent that owns the fix (coder for runtime deps,
+                    # test_designer for test infra) before re-running / escalating.
+                    error_phase = getattr(runner_results, "error_phase", None)
                     recovery = route_test_analysis_recoverable_error(
-                        analysis, self.run.retry_counters, cfg
+                        error_phase, self.run.retry_counters, cfg
                     )
                     if recovery is not None:
+                        # Enrich the routing log line with the actual failure text.
+                        stderr_tail = getattr(runner_results, "stderr_tail", "") or ""
+                        if stderr_tail:
+                            recovery.detail = f"{recovery.detail} | {stderr_tail[:200]}"
                         self._apply_outcome(recovery)
                         if recovery.decision == "escalate":
                             self._escalate(recovery.escalation_reason or "human_required")
-                        env_fix_context = _build_env_fix_context(analysis)
-                        next_state = recovery.next_state   # "test_design"
+                        if recovery.next_state == "coding":
+                            dep_fix_context = _build_dep_fix_context(runner_results)
+                            next_state = "coding"
+                        else:  # test_design
+                            env_fix_context = _build_env_fix_context(analysis)
+                            next_state = "test_design"
                     else:
                         outcome = route_test_analysis_error(self.run.retry_counters, cfg)
                         self._apply_outcome(outcome)
@@ -1425,6 +1487,7 @@ class StateMachine:
         prompts: dict[str, str],
         human_interface: Any,
         code_fix_context: dict[str, Any] | None = None,
+        dep_fix_context: dict[str, Any] | None = None,
     ) -> CodeArtifact:
         """Inner loop: coder → code review → security review. Retries on review failure."""
         retry_context: dict[str, Any] | None = None
@@ -1434,8 +1497,10 @@ class StateMachine:
             code_art = self.run_coding(
                 req_doc, arch_doc, prompts["coder"], retry_context, code_fix_context,
                 entry_stripped_fields=stripped_fields,
+                dep_fix_context=dep_fix_context,
             )
             code_fix_context = None  # only applies to the first coding attempt
+            dep_fix_context = None   # only applies to the first coding attempt
             stripped_fields = None
 
             try:
@@ -1556,4 +1621,19 @@ def _build_env_fix_context(analysis: "TestAnalysis") -> dict[str, Any]:
             for fa in analysis.failure_analyses
             if fa.root_cause_hypothesis == "environment"
         ],
+    }
+
+
+def _build_dep_fix_context(runner_results: Any) -> dict[str, Any]:
+    """
+    Build the dep_fix_context passed back to the coder to repair a runtime-dependency
+    failure (e.g. a bad/missing package in requirements.txt).
+
+    No firewall projection needed: the coder owns requirements.txt and the runner
+    stderr is its own build output (pip/runtime), not another agent's artifact.
+    """
+    return {
+        "trigger": "runtime_dep_error",
+        "error_phase": getattr(runner_results, "error_phase", None),
+        "stderr_tail": getattr(runner_results, "stderr_tail", ""),
     }

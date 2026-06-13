@@ -8,7 +8,9 @@ retry_limits:
   coder_validation_retries: 2         # requirements.txt present + AC coverage; fires before review
   architecture_validation_retries: 2
   infrastructure_retries: 3           # shared: test runner error + test analyst error verdict
-  environment_repair: 2               # auto-recovery: re-invoke test_designer to fix env/deps
+  environment_repair: 2               # auto-recovery: re-invoke test_designer to fix test infra/deps
+  dependency_repair: 2                # auto-recovery: re-invoke coder to fix runtime requirements.txt
+  low_confidence_reprompt: 1          # one-shot re-prompt before a low-confidence escalation
   malformed_output_retries: 2         # independent of all loop counters
   codeforge_state_commit: 3
   source_code_commit: 3

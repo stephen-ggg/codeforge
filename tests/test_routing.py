@@ -1,72 +1,84 @@
 """
 Recovery-routing tests.
 
-Guards the auto-recovery layer: a recoverable `error` verdict (e.g. an environment /
-missing-test-dependency failure) is routed back to the agent that can fix it before
-escalating to a human, bounded by a dedicated retry budget.
+Guards the auto-recovery layer: a recoverable test-runner `error` is routed back to the
+agent that owns the fix — keyed on the runner's deterministic error_phase — before
+escalating, bounded by a dedicated retry budget. Also covers the one-shot low-confidence
+re-prompt.
 """
 from __future__ import annotations
 
 from codeforge.orchestrator.routing import (
-    _dominant_recoverable_cause,
+    route_low_confidence_reprompt,
     route_test_analysis_recoverable_error,
 )
-from codeforge.schemas.contracts import FailureAnalysis, RetryCounters, TestAnalysis
+from codeforge.schemas.contracts import RetryCounters
+
+_CONFIG = {
+    "retry_limits": {
+        "dependency_repair": 2,
+        "environment_repair": 2,
+        "low_confidence_reprompt": 1,
+    }
+}
 
 
-def _analysis(*causes: str) -> TestAnalysis:
-    return TestAnalysis(
-        verdict="error",
-        summary="pytest could not collect tests",
-        failure_analyses=[
-            FailureAnalysis(
-                test_case_id=f"TC-{i}",
-                root_cause_hypothesis=cause,
-                confidence=0.99,
-                evidence="pytest: unrecognized arguments --json-report",
-                recommended_action="Add pytest-json-report>=1.5 to requirements-test.txt",
-            )
-            for i, cause in enumerate(causes)
-        ],
-        coverage_update=[],
-    )
+# ----------------------------------------------------------------------
+# error_phase → fixing agent
+# ----------------------------------------------------------------------
 
 
-_CONFIG = {"retry_limits": {"environment_repair": 2}}
+def test_runtime_dep_phase_routes_to_coder() -> None:
+    for phase in ("missing_requirements_txt", "runtime_dep_install_failed"):
+        out = route_test_analysis_recoverable_error(phase, RetryCounters(), _CONFIG)
+        assert out is not None, phase
+        assert out.decision == "retry_same_agent"
+        assert out.next_state == "coding"
+        assert out.counter_deltas == {"dependency_repair": 1}
+        assert out.row_id == "test_error_runtime_dep_repair"
+        assert out.detail == f"error_phase={phase}"
 
 
-def test_environment_within_budget_routes_to_test_design() -> None:
-    outcome = route_test_analysis_recoverable_error(
-        _analysis("environment"), RetryCounters(), _CONFIG
-    )
-    assert outcome is not None
-    assert outcome.decision == "retry_same_agent"
-    assert outcome.next_state == "test_design"
-    assert outcome.counter_deltas == {"environment_repair": 1}
-    assert outcome.extra["recovery_root_cause"] == "environment"
-    assert outcome.escalation_reason is None
+def test_test_infra_phase_routes_to_test_designer() -> None:
+    for phase in ("no_results_json", "pytest_exit_error"):
+        out = route_test_analysis_recoverable_error(phase, RetryCounters(), _CONFIG)
+        assert out is not None, phase
+        assert out.next_state == "test_design"
+        assert out.counter_deltas == {"environment_repair": 1}
+        assert out.row_id == "test_error_test_infra_repair"
 
 
-def test_environment_over_budget_escalates() -> None:
-    counters = RetryCounters(environment_repair=2)  # at the limit
-    outcome = route_test_analysis_recoverable_error(_analysis("environment"), counters, _CONFIG)
-    assert outcome is not None
-    assert outcome.decision == "escalate"
-    assert outcome.escalation_reason == "human_required"
-    assert outcome.row_id.endswith("_exhausted")
-    assert outcome.next_state == "failed_escalated"
+def test_over_budget_escalates() -> None:
+    counters = RetryCounters(dependency_repair=2)  # at the limit
+    out = route_test_analysis_recoverable_error("runtime_dep_install_failed", counters, _CONFIG)
+    assert out is not None
+    assert out.decision == "escalate"
+    assert out.escalation_reason == "human_required"
+    assert out.row_id.endswith("_exhausted")
 
 
-def test_non_recoverable_cause_returns_none() -> None:
-    # 'ambiguous' has no recovery route; empty failures likewise.
-    assert route_test_analysis_recoverable_error(_analysis("ambiguous"), RetryCounters(), _CONFIG) is None
-    assert route_test_analysis_recoverable_error(_analysis(), RetryCounters(), _CONFIG) is None
+def test_unmapped_phase_returns_none() -> None:
+    # transient/corrupt output and "no phase" are not auto-recoverable
+    assert route_test_analysis_recoverable_error("results_parse_error", RetryCounters(), _CONFIG) is None
+    assert route_test_analysis_recoverable_error(None, RetryCounters(), _CONFIG) is None
 
 
-def test_mixed_with_code_bug_is_not_auto_recovered() -> None:
-    # A code_bug/spec_gap mixed in means it's not ours to silently repair.
-    assert _dominant_recoverable_cause(_analysis("environment", "code_bug")) is None
-    assert route_test_analysis_recoverable_error(
-        _analysis("environment", "code_bug"), RetryCounters(), _CONFIG
-    ) is None
-    assert _dominant_recoverable_cause(_analysis("environment")) == "environment"
+# ----------------------------------------------------------------------
+# low-confidence one-shot re-prompt
+# ----------------------------------------------------------------------
+
+
+def test_low_confidence_reprompt_in_budget() -> None:
+    out = route_low_confidence_reprompt("coder", RetryCounters(), _CONFIG)
+    assert out.decision == "re_prompt_same_agent"
+    assert out.next_state == "coder_reprompt"
+    assert out.counter_deltas == {"low_confidence_reprompt": 1}
+    assert out.escalation_reason is None
+
+
+def test_low_confidence_reprompt_exhausted_escalates() -> None:
+    counters = RetryCounters(low_confidence_reprompt=1)  # at the limit
+    out = route_low_confidence_reprompt("coder", counters, _CONFIG)
+    assert out.decision == "escalate"
+    assert out.escalation_reason == "low_confidence"
+    assert out.row_id == "low_confidence_reprompt_exhausted"
