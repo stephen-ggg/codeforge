@@ -144,7 +144,7 @@ class ArtifactStore:
 
         Goes to raw_outputs/<artifact_id>.json — never mixed with validated artifacts.
         Called by the orchestrator immediately after receiving the LLM response,
-        before Layer 1 validation runs.
+        before structural validation runs.
         """
         raw_path = self._raw_outputs_dir / f"{artifact_id}.json"
         raw_path.write_text(

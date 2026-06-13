@@ -74,7 +74,7 @@ def route_malformed(
     config: dict[str, Any],
     agent_id: str,
 ) -> RoutingOutcome:
-    """Layer 1 structural validation failure — re-prompt the same agent or escalate."""
+    """Structural validation failure — re-prompt the same agent or escalate."""
     limit = _get_limit(config, "malformed_output_retries", 2)
     if _within_budget(counters.malformed_output, limit):
         return RoutingOutcome(
@@ -113,7 +113,7 @@ def route_ceiling_exceeded() -> RoutingOutcome:
 
 
 def route_low_confidence(agent_id: str) -> RoutingOutcome:
-    """Layer 3: confidence below threshold."""
+    """Policy stage: confidence below threshold."""
     return RoutingOutcome(
         row_id="low_confidence",
         decision="escalate",

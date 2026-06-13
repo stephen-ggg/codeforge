@@ -248,7 +248,7 @@ class RetryCounters(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ValidationError(BaseModel):
-    """Details of a single structural validation failure (Layer 1)."""
+    """Details of a single structural validation failure."""
     field_path: str
     error_type: Literal[
         "missing_required",
@@ -262,7 +262,7 @@ class ValidationError(BaseModel):
 
 
 class MalformedOutputRePrompt(BaseModel):
-    """Layer 1 re-prompt: structural validation failure."""
+    """Structural-stage re-prompt: structural validation failure."""
     reason: Literal["malformed_output"] = "malformed_output"
     original_input_ref: str                 # assembly_id
     validation_errors: list[ValidationError]
@@ -272,7 +272,7 @@ class MalformedOutputRePrompt(BaseModel):
 
 class ContractViolationRePrompt(BaseModel):
     """
-    Layer 2 re-prompt: contract rule failure.
+    Contract-stage re-prompt: contract rule failure.
     Exactly one payload field is populated per the Part 4 mapping.
     """
     reason: Literal["contract_violation"] = "contract_violation"

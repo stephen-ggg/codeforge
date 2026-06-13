@@ -1,12 +1,13 @@
 """
-schemas/validation.py — Three-layer output validator.
+schemas/validation.py — Three-stage output validator.
 
-Layer 1 — Structural validation (schema check via Pydantic v2)
-Layer 2 — Contract validation (business rules)
-Layer 3 — Business gate checks (confidence, block flags, global ceiling)
+Structural validation — schema check via Pydantic v2
+Contract validation   — business rules
+Policy validation      — confidence, block flags, global ceiling
 
-The orchestrator calls these in order. Layer 1 fires first; layers 2 and 3 fire
-only if layer 1 passes. All three layers are deterministic code — no LLM involved.
+The orchestrator calls these in order. Structural fires first; contract and
+policy fire only if structural passes. All three stages are deterministic
+code — no LLM involved.
 """
 
 from __future__ import annotations
@@ -38,25 +39,25 @@ from codeforge.schemas.contracts import (
 
 class OutputValidator:
     """
-    Three-layer validator for all agent outputs.
+    Three-stage validator for all agent outputs.
 
     Usage:
         validator = OutputValidator(config_snapshot)
-        ok, errors = validator.validate_layer1(raw_str, RequirementsComplete)
+        ok, errors = validator.validate_structural(raw_str, RequirementsComplete)
         if ok:
-            ok, reprompt = validator.validate_layer2(output, "requirements_analyst")
+            ok, reprompt = validator.validate_contract(output, "requirements_analyst")
             if ok:
-                ok, escalation_reason = validator.validate_layer3(output, "requirements_analyst", counters)
+                ok, escalation_reason = validator.validate_policy(output, "requirements_analyst", counters)
     """
 
     def __init__(self, config_snapshot: dict[str, Any]) -> None:
         self._config = config_snapshot
 
     # ------------------------------------------------------------------
-    # Layer 1 — Structural validation
+    # Structural validation
     # ------------------------------------------------------------------
 
-    def validate_layer1(
+    def validate_structural(
         self,
         raw: str,
         expected_model: type[BaseModel],
@@ -167,10 +168,10 @@ class OutputValidator:
         )
 
     # ------------------------------------------------------------------
-    # Layer 2 — Contract validation (business rules)
+    # Contract validation (business rules)
     # ------------------------------------------------------------------
 
-    def validate_layer2(
+    def validate_contract(
         self,
         output: AgentOutput[Any],
         agent_id: AgentId,
@@ -199,7 +200,7 @@ class OutputValidator:
                 )
             # D9: error severity forces fail
             if any(f.severity == "error" for f in payload.findings) and payload.verdict != "fail":
-                # This is a Layer 2 correction — not a reprompt; handled by orchestrator routing.
+                # This is a contract-stage correction — not a reprompt; handled by orchestrator routing.
                 # We signal it here so the routing layer can apply the force.
                 # Returning True with a sentinel note — orchestrator checks this separately.
                 pass
@@ -331,10 +332,10 @@ class OutputValidator:
         )
 
     # ------------------------------------------------------------------
-    # Layer 3 — Business gate checks
+    # Policy validation (confidence, block flags, global ceiling)
     # ------------------------------------------------------------------
 
-    def validate_layer3(
+    def validate_policy(
         self,
         output: AgentOutput[Any],
         agent_id: AgentId,

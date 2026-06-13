@@ -1,9 +1,9 @@
 """
 orchestrator/gates.py — Gate evaluation for the orchestrator.
 
-Wraps the three-layer validator from schemas/validation.py and adds:
+Wraps the three-stage validator from schemas/validation.py and adds:
   - Pre-invocation global ceiling check
-  - Cross-document Layer 2 checks (ac_coverage_must, arch_criteria_coverage,
+  - Cross-document contract checks (ac_coverage_must, arch_criteria_coverage,
     coverage_map_valid) that need access to both the output AND the requirements_doc
   - D9 rule: error severity forces verdict: fail (code reviewer)
   - D9 rule: critical severity forces verdict: fail (security reviewer)
@@ -36,12 +36,12 @@ from codeforge.orchestrator.event_log import EventLog
 
 
 class GateResult:
-    """Result of running all three validation layers against one agent output."""
+    """Result of running all three validation stages against one agent output."""
 
     def __init__(self) -> None:
-        self.layer1_passed: bool = True
-        self.layer2_passed: bool = True
-        self.layer3_passed: bool = True
+        self.structural_passed: bool = True
+        self.contract_passed: bool = True
+        self.policy_passed: bool = True
         self.malformed_reprompt: MalformedOutputRePrompt | None = None
         self.violation_reprompt: ContractViolationRePrompt | None = None
         self.escalation_reason: EscalationReason | None = None
@@ -49,7 +49,7 @@ class GateResult:
 
     @property
     def passed(self) -> bool:
-        return self.layer1_passed and self.layer2_passed and self.layer3_passed
+        return self.structural_passed and self.contract_passed and self.policy_passed
 
 
 class GateEvaluator:
@@ -99,20 +99,20 @@ class GateEvaluator:
         assembly_id: str,
         counters: RetryCounters,
         agent_call_count: int,
-        # Extra context for cross-document Layer 2 checks
+        # Extra context for cross-document contract checks
         requirements_doc: RequirementsDoc | None = None,
     ) -> GateResult:
         """
-        Run all three validation layers against raw agent output.
+        Run all three validation stages against raw agent output.
 
-        Layer 1 fires first. Layers 2 and 3 only run if Layer 1 passes.
+        Structural fires first. Contract and policy only run if structural passes.
         Gate events are emitted for every rule checked.
         """
         result = GateResult()
         counters_snap = self._make_counters_snap(counters, agent_call_count)
 
-        # --- Layer 1: structural validation ---
-        l1_ok, malformed = self._validator.validate_layer1(
+        # --- Structural validation ---
+        structural_ok, malformed = self._validator.validate_structural(
             raw=raw,
             expected_model=expected_model,
             attempt_number=attempt_number,
@@ -120,15 +120,15 @@ class GateEvaluator:
         )
         self._log.emit_gate(
             rule="schema_valid",
-            passed=l1_ok,
+            passed=structural_ok,
             source_agent=agent_id,
             counters=counters_snap,
-            detail="structural validation against Pydantic model" if l1_ok
+            detail="structural validation against Pydantic model" if structural_ok
                    else f"validation errors: {len(malformed.validation_errors) if malformed else 0}",
         )
 
-        if not l1_ok:
-            result.layer1_passed = False
+        if not structural_ok:
+            result.structural_passed = False
             result.malformed_reprompt = malformed
             return result
 
@@ -141,17 +141,17 @@ class GateEvaluator:
         # --- D9: force verdict to fail if error/critical severity present ---
         self._apply_severity_force(output, agent_id)
 
-        # --- Layer 2: contract validation ---
-        l2_ok, violation = self._validator.validate_layer2(
+        # --- Contract validation ---
+        contract_ok, violation = self._validator.validate_contract(
             output=output,
             agent_id=agent_id,
             attempt_number=attempt_number,
             original_input_ref=assembly_id,
         )
 
-        # Cross-document Layer 2 checks (need requirements_doc)
-        if l2_ok and requirements_doc is not None:
-            l2_ok, violation = self._cross_document_checks(
+        # Cross-document contract checks (need requirements_doc)
+        if contract_ok and requirements_doc is not None:
+            contract_ok, violation = self._cross_document_checks(
                 output=output,
                 agent_id=agent_id,
                 requirements_doc=requirements_doc,
@@ -160,31 +160,31 @@ class GateEvaluator:
             )
 
         from codeforge.schemas.contracts import GateRule as GateRuleType
-        if violation and not l2_ok:
+        if violation and not contract_ok:
             fail_rule: GateRuleType = violation.rule
         else:
             fail_rule = "schema_valid"
         self._log.emit_gate(
             rule=fail_rule,
-            passed=l2_ok,
+            passed=contract_ok,
             source_agent=agent_id,
             counters=counters_snap,
-            detail="contract rules passed" if l2_ok else (violation.detail if violation else ""),
+            detail="contract rules passed" if contract_ok else (violation.detail if violation else ""),
         )
 
-        if not l2_ok:
-            result.layer2_passed = False
+        if not contract_ok:
+            result.contract_passed = False
             result.violation_reprompt = violation
             return result
 
-        # --- Layer 3: business gate checks ---
-        l3_ok, escalation_reason = self._validator.validate_layer3(
+        # --- Policy validation (confidence, block flags, global ceiling) ---
+        policy_ok, escalation_reason = self._validator.validate_policy(
             output=output,
             agent_id=agent_id,
             counters=counters,
         )
 
-        if not l3_ok:
+        if not policy_ok:
             block_rule: GateRuleType = "block_flag_present"
             conf_rule: GateRuleType = "confidence_threshold"
             l3_rule = block_rule if escalation_reason == "block_flag" else conf_rule
@@ -195,7 +195,7 @@ class GateEvaluator:
                 counters=counters_snap,
                 detail=f"escalation_reason={escalation_reason}",
             )
-            result.layer3_passed = False
+            result.policy_passed = False
             result.escalation_reason = escalation_reason
             return result
 
@@ -217,7 +217,7 @@ class GateEvaluator:
         """
         D9 rule: error severity forces verdict: fail (code reviewer).
                  critical severity forces verdict: fail (security reviewer).
-        Mutates the output payload in-place before Layer 2 runs.
+        Mutates the output payload in-place before contract validation runs.
         """
         payload = output.output
         if agent_id == "code_reviewer" and isinstance(payload, ReviewReport):
@@ -241,7 +241,7 @@ class GateEvaluator:
         assembly_id: str,
     ) -> tuple[bool, ContractViolationRePrompt | None]:
         """
-        Layer 2 checks that require both the agent output AND the requirements_doc.
+        Contract checks that require both the agent output AND the requirements_doc.
         These can't be done in the validator alone since it only sees one document.
         """
         payload = output.output

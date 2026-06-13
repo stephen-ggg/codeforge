@@ -437,7 +437,7 @@ class StateMachine:
                 agent_call_count=self.run.agent_call_count,
             )
 
-            if not gate_result.layer1_passed:
+            if not gate_result.structural_passed:
                 reprompt = gate_result.malformed_reprompt
                 outcome = route_malformed(
                     self.run.retry_counters, self._config.to_dict(), "requirements_analyst"
@@ -447,7 +447,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
-            if not gate_result.layer3_passed:
+            if not gate_result.policy_passed:
                 if gate_result.escalation_reason == "block_flag":
                     self._apply_outcome(route_block_flag())
                     self._escalate("block_flag")
@@ -546,7 +546,7 @@ class StateMachine:
                 requirements_doc=requirements_doc,
             )
 
-            if not gate_result.layer1_passed:
+            if not gate_result.structural_passed:
                 reprompt = gate_result.malformed_reprompt
                 outcome = route_malformed(
                     self.run.retry_counters, self._config.to_dict(), "architecture_designer"
@@ -556,7 +556,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
-            if not gate_result.layer2_passed:
+            if not gate_result.contract_passed:
                 reprompt = gate_result.violation_reprompt
                 outcome = route_architecture_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
@@ -564,7 +564,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "max_retries_exceeded")
                 continue
 
-            if not gate_result.layer3_passed:
+            if not gate_result.policy_passed:
                 if gate_result.escalation_reason == "block_flag":
                     self._apply_outcome(route_block_flag())
                     self._escalate("block_flag")
@@ -686,7 +686,7 @@ class StateMachine:
                 requirements_doc=requirements_doc,
             )
 
-            if not gate_result.layer1_passed:
+            if not gate_result.structural_passed:
                 reprompt = gate_result.malformed_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "coder")
                 self._apply_outcome(outcome)
@@ -694,7 +694,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
-            if not gate_result.layer2_passed:
+            if not gate_result.contract_passed:
                 reprompt = gate_result.violation_reprompt
                 violation = gate_result.violation_reprompt
                 if violation and violation.rule == "requirements_txt_present":
@@ -706,7 +706,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "max_retries_exceeded")
                 continue
 
-            if not gate_result.layer3_passed:
+            if not gate_result.policy_passed:
                 if gate_result.escalation_reason == "block_flag":
                     self._apply_outcome(route_block_flag())
                     self._escalate("block_flag")
@@ -766,7 +766,7 @@ class StateMachine:
                 agent_call_count=self.run.agent_call_count,
             )
 
-            if not gate_result.layer1_passed or not gate_result.layer2_passed:
+            if not gate_result.structural_passed or not gate_result.contract_passed:
                 reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "code_reviewer")
                 self._apply_outcome(outcome)
@@ -774,7 +774,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
-            if not gate_result.layer3_passed:
+            if not gate_result.policy_passed:
                 if gate_result.escalation_reason == "block_flag":
                     self._apply_outcome(route_block_flag())
                     self._escalate("block_flag")
@@ -848,7 +848,7 @@ class StateMachine:
                 agent_call_count=self.run.agent_call_count,
             )
 
-            if not gate_result.layer1_passed or not gate_result.layer2_passed:
+            if not gate_result.structural_passed or not gate_result.contract_passed:
                 reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "security_reviewer")
                 self._apply_outcome(outcome)
@@ -856,7 +856,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
-            if not gate_result.layer3_passed:
+            if not gate_result.policy_passed:
                 if gate_result.escalation_reason == "block_flag":
                     self._apply_outcome(route_block_flag())
                     self._escalate("block_flag")
@@ -943,7 +943,7 @@ class StateMachine:
                 requirements_doc=requirements_doc,
             )
 
-            if not gate_result.layer1_passed:
+            if not gate_result.structural_passed:
                 reprompt = gate_result.malformed_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "test_designer")
                 self._apply_outcome(outcome)
@@ -951,7 +951,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
-            if not gate_result.layer2_passed:
+            if not gate_result.contract_passed:
                 reprompt = gate_result.violation_reprompt
                 outcome = route_test_design_covmap_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
@@ -959,7 +959,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "max_retries_exceeded")
                 continue
 
-            if not gate_result.layer3_passed:
+            if not gate_result.policy_passed:
                 if gate_result.escalation_reason == "block_flag":
                     self._apply_outcome(route_block_flag())
                     self._escalate("block_flag")
@@ -1023,7 +1023,7 @@ class StateMachine:
                 agent_call_count=self.run.agent_call_count,
             )
 
-            if not gate_result.layer1_passed or not gate_result.layer2_passed:
+            if not gate_result.structural_passed or not gate_result.contract_passed:
                 reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
                 outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "test_analyst")
                 self._apply_outcome(outcome)
@@ -1031,7 +1031,7 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
-            if not gate_result.layer3_passed:
+            if not gate_result.policy_passed:
                 if gate_result.escalation_reason == "block_flag":
                     self._apply_outcome(route_block_flag())
                     self._escalate("block_flag")
