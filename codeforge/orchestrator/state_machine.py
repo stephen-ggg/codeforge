@@ -358,7 +358,7 @@ class StateMachine:
             schema_version=meta.schema_version,
         )
 
-    def _record_assumptions(self, output: Any, agent_id: str) -> None:
+    def _record_assumptions(self, output: Any, agent_id: AgentId) -> None:
         """Append recordable assumptions from agent output to assumptions_log."""
         from codeforge.schemas.contracts import AssumptionEntry
         entries = [
