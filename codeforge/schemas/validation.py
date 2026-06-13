@@ -248,7 +248,8 @@ class OutputValidator:
 
         # ---- Coder ----
         if agent_id == "coder" and isinstance(payload, CodeArtifact):
-            # requirements_txt_present fires first (spec P3-no-req before P3-ac-gap)
+            # requirements_txt_present fires first (coding_missing_requirements_txt
+            # before coding_acceptance_criteria_gap)
             has_requirements_txt = any(
                 f.path == "requirements.txt" for f in payload.files
             )

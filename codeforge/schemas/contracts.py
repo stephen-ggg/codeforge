@@ -958,7 +958,7 @@ class GateEvent(OrchestratorEventBase):
 
 class RoutingEvent(OrchestratorEventBase):
     event_type: Literal["routing"] = "routing"
-    routing_table_row: str                  # stable row id, e.g. "P4A-fail"
+    routing_table_row: str                  # stable, self-describing row id, e.g. "code_review_fail"
     decision: RoutingDecision
     counter_deltas: dict[str, int] = Field(default_factory=dict)
     counter_resets: list[str] = Field(default_factory=list)

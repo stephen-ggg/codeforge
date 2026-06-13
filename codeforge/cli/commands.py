@@ -98,7 +98,7 @@ def _do_commit(
     project_dir: Path,
 ) -> None:
     from codeforge.agents.commit_writer import CommitWriter
-    from codeforge.orchestrator.routing import route_p6_state_fail, route_p6_src_fail, route_p6_success
+    from codeforge.orchestrator.routing import route_commit_state_fail, route_commit_src_fail, route_commit_success
 
     run = sm.run
     writer = CommitWriter(config, project_dir)
@@ -120,7 +120,7 @@ def _do_commit(
             typer.echo(f"Codeforge state committed: {state_commit_sha}")
             break
 
-        outcome = route_p6_state_fail(run.retry_counters, config.to_dict())
+        outcome = route_commit_state_fail(run.retry_counters, config.to_dict())
         sm._apply_outcome(outcome)  # increments counter + emits routing event
         if outcome.decision == "escalate":
             raise EscalationError(
@@ -153,7 +153,7 @@ def _do_commit(
                 typer.echo(f"PR opened: {src_result.pr_url}")
             break
 
-        outcome = route_p6_src_fail(run.retry_counters, config.to_dict())
+        outcome = route_commit_src_fail(run.retry_counters, config.to_dict())
         sm._apply_outcome(outcome)
         if outcome.decision == "escalate":
             raise EscalationError(
@@ -164,7 +164,7 @@ def _do_commit(
             f"Source commit failed, retrying ({src_result.error_message})", err=True
         )
 
-    sm._apply_outcome(route_p6_success())
+    sm._apply_outcome(route_commit_success())
 
 
 # ---------------------------------------------------------------------------

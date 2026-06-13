@@ -35,28 +35,29 @@ from codeforge.orchestrator.routing import (
     route_block_flag,
     route_ceiling_exceeded,
     route_low_confidence,
-    route_p1_clarify,
-    route_p1_complete,
-    route_p1_confirmed,
-    route_p1_rejected,
-    route_p2_valid,
-    route_p2_invalid,
-    route_p2_lowconf,
-    route_p3_no_requirements_txt,
-    route_p3_ac_gap,
-    route_p3_valid,
-    route_p4a_fail,
-    route_p4a_pass,
-    route_p4b_fail,
-    route_p4b_pass,
-    route_p5d_covmap_invalid,
-    route_p5e_error,
-    route_p5c_pass,
-    route_p5c_code_bug,
-    route_p5c_test_bug,
-    route_p5c_spec_gap,
-    route_p5c_ambiguous,
-    route_p5c_analyst_error,
+    route_requirements_clarify,
+    route_requirements_complete,
+    route_requirements_confirmed,
+    route_requirements_rejected,
+    route_architecture_valid,
+    route_architecture_invalid,
+    route_architecture_lowconf,
+    route_coding_no_requirements_txt,
+    route_coding_ac_gap,
+    route_coding_valid,
+    route_code_review_fail,
+    route_code_review_pass,
+    route_security_review_fail,
+    route_security_review_pass,
+    route_test_design_covmap_invalid,
+    route_test_design_valid,
+    route_test_execution_error,
+    route_test_analysis_pass,
+    route_test_analysis_code_bug,
+    route_test_analysis_test_bug,
+    route_test_analysis_spec_gap,
+    route_test_analysis_ambiguous,
+    route_test_analysis_error,
 )
 from codeforge.orchestrator.state_writer import flush_pending_writes
 from codeforge.schemas.contracts import (
@@ -298,7 +299,7 @@ class StateMachine:
         typed_actor = cast(LogActor, agent_id)
         typed_invocation = cast(HandoffInvocationType, invocation_type)
 
-        # Pre-invocation ceiling check (X-ceiling)
+        # Pre-invocation ceiling check (global agent-call ceiling)
         if not self.gates.check_global_ceiling(
             self.run.agent_call_count, self._counters_snap()
         ):
@@ -383,17 +384,17 @@ class StateMachine:
             self.pending.merge_append("assumptions_log", entries)
 
     # ------------------------------------------------------------------
-    # Phase 1 — Requirements
+    # Requirements
     # ------------------------------------------------------------------
 
-    def run_phase1(
+    def run_requirements(
         self,
         human_brief: str,
         human_interface: Any,
         system_prompt: str,
     ) -> RequirementsDoc:
         """
-        Drive Phase 1 (requirements clarification) to completion.
+        Drive requirements clarification to completion.
         Returns the confirmed RequirementsDoc.
         human_interface: object with ask_clarification(), confirm_requirements() methods.
         """
@@ -466,7 +467,7 @@ class StateMachine:
                     "answers": [a.model_dump() if hasattr(a, 'model_dump') else a for a in answers],
                 })
                 reprompt = None  # fresh round after human input
-                outcome = route_p1_clarify()
+                outcome = route_requirements_clarify()
                 self._apply_outcome(outcome)
                 continue
 
@@ -474,7 +475,7 @@ class StateMachine:
             req_doc_data = output.output.get("requirements_doc", {})
 
             # Human confirm gate
-            outcome = route_p1_complete()
+            outcome = route_requirements_complete()
             self._apply_outcome(outcome)
 
             confirmed = human_interface.confirm_requirements(req_doc_data)
@@ -483,7 +484,7 @@ class StateMachine:
                 ref = self._store_artifact("requirements_doc", "requirements_analyst", output)
                 self.run.artifacts["requirements_doc"] = ref
                 self._record_assumptions(output, "requirements_analyst")
-                outcome = route_p1_confirmed()
+                outcome = route_requirements_confirmed()
                 self._apply_outcome(outcome)
                 return RequirementsDoc(**req_doc_data)
             else:
@@ -493,22 +494,22 @@ class StateMachine:
                     "rejection_feedback": feedback,
                 }
                 reprompt = None  # rejection context is in confirm_rejection field
-                outcome = route_p1_rejected()
+                outcome = route_requirements_rejected()
                 self._apply_outcome(outcome)
                 continue
 
     # ------------------------------------------------------------------
-    # Phase 2 — Architecture
+    # Architecture
     # ------------------------------------------------------------------
 
-    def run_phase2(
+    def run_architecture(
         self,
         requirements_doc: RequirementsDoc,
         system_prompt: str,
         human_interface: Any,
         spec_gap_context: dict[str, Any] | None = None,
     ) -> ArchitectureDoc:
-        """Drive Phase 2 (architecture design) to completion."""
+        """Drive architecture design to completion."""
         self._current_phase = "architecture"
         from codeforge.agents.architecture_designer import ArchitectureDesignerAgent
         from codeforge.schemas.contracts import AgentOutput, InterfaceManifest
@@ -557,7 +558,7 @@ class StateMachine:
 
             if not gate_result.layer2_passed:
                 reprompt = gate_result.violation_reprompt
-                outcome = route_p2_invalid(self.run.retry_counters, self._config.to_dict())
+                outcome = route_architecture_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
                     self._escalate(outcome.escalation_reason or "max_retries_exceeded")
@@ -567,7 +568,7 @@ class StateMachine:
                 if gate_result.escalation_reason == "block_flag":
                     self._apply_outcome(route_block_flag())
                     self._escalate("block_flag")
-                self._apply_outcome(route_p2_lowconf())
+                self._apply_outcome(route_architecture_lowconf())
                 self._escalate("low_confidence")
 
             data = json.loads(raw)
@@ -576,7 +577,7 @@ class StateMachine:
 
             # Check for locked tech decisions
             locked = [d for d in arch_doc.tech_decisions if d.locked]
-            outcome = route_p2_valid(has_locked_decisions=bool(locked))
+            outcome = route_architecture_valid(has_locked_decisions=bool(locked))
             self._apply_outcome(outcome)
 
             if locked:
@@ -631,10 +632,10 @@ class StateMachine:
             return arch_doc
 
     # ------------------------------------------------------------------
-    # Phase 3 — Implementation (Coder)
+    # Coding (Implementation)
     # ------------------------------------------------------------------
 
-    def run_phase3(
+    def run_coding(
         self,
         requirements_doc: RequirementsDoc,
         architecture_doc: ArchitectureDoc,
@@ -643,7 +644,7 @@ class StateMachine:
         code_fix_context: dict[str, Any] | None = None,
         entry_stripped_fields: list[str] | None = None,
     ) -> CodeArtifact:
-        """Drive Phase 3 (coding) to completion."""
+        """Drive coding to completion."""
         self._current_phase = "coding"
         from codeforge.agents.coder import CoderAgent
         from codeforge.schemas.contracts import AgentOutput
@@ -697,9 +698,9 @@ class StateMachine:
                 reprompt = gate_result.violation_reprompt
                 violation = gate_result.violation_reprompt
                 if violation and violation.rule == "requirements_txt_present":
-                    outcome = route_p3_no_requirements_txt(self.run.retry_counters, self._config.to_dict())
+                    outcome = route_coding_no_requirements_txt(self.run.retry_counters, self._config.to_dict())
                 else:
-                    outcome = route_p3_ac_gap(self.run.retry_counters, self._config.to_dict())
+                    outcome = route_coding_ac_gap(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
                     self._escalate(outcome.escalation_reason or "max_retries_exceeded")
@@ -716,7 +717,7 @@ class StateMachine:
             output: AgentOutput[Any] = AgentOutput(**data)
             code_artifact = CodeArtifact(**output.output)
 
-            outcome = route_p3_valid()
+            outcome = route_coding_valid()
             self._apply_outcome(outcome)
 
             ref = self._store_artifact("code_artifact", "coder", output)
@@ -725,17 +726,17 @@ class StateMachine:
             return code_artifact
 
     # ------------------------------------------------------------------
-    # Phase 4A — Code review (Loop A)
+    # Code review
     # ------------------------------------------------------------------
 
-    def run_phase4a(
+    def run_code_review(
         self,
         requirements_doc: RequirementsDoc,
         architecture_doc: ArchitectureDoc,
         code_artifact: CodeArtifact,
         system_prompt: str,
     ) -> ReviewReport:
-        """Drive Loop A (code review) to completion. Returns passing ReviewReport."""
+        """Drive code review to completion. Returns passing ReviewReport."""
         self._current_phase = "code_review"
         from codeforge.agents.code_reviewer import CodeReviewerAgent
         from codeforge.schemas.contracts import AgentOutput
@@ -785,7 +786,7 @@ class StateMachine:
             report = ReviewReport(**output.output)
 
             if report.verdict == "fail":
-                outcome = route_p4a_fail(self.run.retry_counters, self._config.to_dict())
+                outcome = route_code_review_fail(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
                     self._escalate(outcome.escalation_reason or "max_retries_exceeded")
@@ -800,7 +801,7 @@ class StateMachine:
                      "created_at": _now()}
                 ])
 
-            outcome = route_p4a_pass(report.verdict == "pass_with_notes")
+            outcome = route_code_review_pass(report.verdict == "pass_with_notes")
             self._apply_outcome(outcome)
             ref = self._store_artifact("review_report", "code_reviewer", output)
             self.run.artifacts["review_report"] = ref
@@ -808,16 +809,16 @@ class StateMachine:
             return report
 
     # ------------------------------------------------------------------
-    # Phase 4B — Security review (Loop B)
+    # Security review
     # ------------------------------------------------------------------
 
-    def run_phase4b(
+    def run_security_review(
         self,
         requirements_doc: RequirementsDoc,
         code_artifact: CodeArtifact,
         system_prompt: str,
     ) -> SecurityReport:
-        """Drive Loop B (security review) to completion. Returns passing SecurityReport."""
+        """Drive security review to completion. Returns passing SecurityReport."""
         self._current_phase = "code_review"
         from codeforge.agents.security_reviewer import SecurityReviewerAgent
         from codeforge.schemas.contracts import AgentOutput
@@ -867,7 +868,7 @@ class StateMachine:
             report = SecurityReport(**output.output)
 
             if report.verdict == "fail":
-                outcome = route_p4b_fail(self.run.retry_counters, self._config.to_dict())
+                outcome = route_security_review_fail(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
                     self._escalate(outcome.escalation_reason or "max_retries_exceeded")
@@ -881,7 +882,7 @@ class StateMachine:
                      "created_at": _now()}
                 ])
 
-            outcome = route_p4b_pass(report.verdict == "pass_with_notes")
+            outcome = route_security_review_pass(report.verdict == "pass_with_notes")
             self._apply_outcome(outcome)
             ref = self._store_artifact("security_report", "security_reviewer", output)
             self.run.artifacts["security_report"] = ref
@@ -889,10 +890,10 @@ class StateMachine:
             return report
 
     # ------------------------------------------------------------------
-    # Phase 5 — Test design
+    # Test design
     # ------------------------------------------------------------------
 
-    def run_phase5_design(
+    def run_test_design(
         self,
         requirements_doc: RequirementsDoc,
         architecture_doc: ArchitectureDoc,
@@ -911,7 +912,7 @@ class StateMachine:
             # Budget check: test_loop must still have remaining budget
             test_loop_limit = self._config.to_dict().get("retry_limits", {}).get("test_loop", 2)
             if self.run.retry_counters.test_loop >= test_loop_limit:
-                outcome = route_p5d_covmap_invalid(self.run.retry_counters, self._config.to_dict())
+                outcome = route_test_design_covmap_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 self._escalate(outcome.escalation_reason or "max_retries_exceeded")
 
@@ -952,7 +953,7 @@ class StateMachine:
 
             if not gate_result.layer2_passed:
                 reprompt = gate_result.violation_reprompt
-                outcome = route_p5d_covmap_invalid(self.run.retry_counters, self._config.to_dict())
+                outcome = route_test_design_covmap_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
                     self._escalate(outcome.escalation_reason or "max_retries_exceeded")
@@ -973,20 +974,16 @@ class StateMachine:
             self.run.artifacts["test_suite"] = ref
             self._record_assumptions(output, "test_designer")
 
-            # Emit P5D-valid routing event (was previously missing from event log)
-            self._apply_outcome(RoutingOutcome(
-                row_id="P5D-valid",
-                decision="invoke_agent",
-                next_state="test_execution",
-            ))
+            # Emit the test_design_valid routing event (was previously missing from event log)
+            self._apply_outcome(route_test_design_valid())
 
             return test_suite
 
     # ------------------------------------------------------------------
-    # Phase 5 — Test analysis
+    # Test analysis
     # ------------------------------------------------------------------
 
-    def run_phase5_analysis(
+    def run_test_analysis(
         self,
         requirements_doc: RequirementsDoc,
         test_suite: TestSuite,
@@ -1051,10 +1048,10 @@ class StateMachine:
             return analysis
 
     # ------------------------------------------------------------------
-    # Phase 6 — Commit (flush + CommitWriter)
+    # Commit (flush + CommitWriter)
     # ------------------------------------------------------------------
 
-    def run_phase6(self) -> None:
+    def run_commit(self) -> None:
         """Flush pending_writes to disk. CommitWriter invocation handled by CLI layer."""
         counters = self._counters_snap()
         flush_pending_writes(
@@ -1135,7 +1132,7 @@ class StateMachine:
         runner_results: Any = None
 
         if initial_state == "requirements":
-            req_doc = self.run_phase1(human_brief, human_interface, prompts["requirements_analyst"])
+            req_doc = self.run_requirements(human_brief, human_interface, prompts["requirements_analyst"])
             next_state = "architecture"
         else:
             # Resuming from a mid-run escalation — load persisted artifacts.
@@ -1172,7 +1169,7 @@ class StateMachine:
         while next_state != "done":
             if next_state == "architecture":
                 assert arch_doc is not None or next_state == "architecture"
-                arch_doc = self.run_phase2(
+                arch_doc = self.run_architecture(
                     req_doc, prompts["architecture_designer"], human_interface,
                     spec_gap_context=spec_gap_context,
                 )
@@ -1188,7 +1185,7 @@ class StateMachine:
 
             elif next_state == "test_design":
                 assert arch_doc is not None
-                test_suite = self.run_phase5_design(
+                test_suite = self.run_test_design(
                     req_doc, arch_doc, prompts["test_designer"],
                     code_fix_context=code_fix_context,
                 )
@@ -1210,7 +1207,7 @@ class StateMachine:
                     )
                     next_state = "test_analysis"
                 except InfrastructureError as exc:
-                    outcome = route_p5e_error(
+                    outcome = route_test_execution_error(
                         self.run.retry_counters, self._config.to_dict()
                     )
                     self._apply_outcome(outcome)
@@ -1221,13 +1218,13 @@ class StateMachine:
             elif next_state == "test_analysis":
                 assert test_suite is not None
                 assert runner_results is not None
-                analysis = self.run_phase5_analysis(
+                analysis = self.run_test_analysis(
                     req_doc, test_suite, runner_results.model_dump(), prompts["test_analyst"]
                 )
                 verdict = analysis.verdict
 
                 if verdict == "pass":
-                    outcome = route_p5c_pass()
+                    outcome = route_test_analysis_pass()
                     self._apply_outcome(outcome)
 
                     # Write test_coverage_map from analysis.coverage_update
@@ -1273,7 +1270,7 @@ class StateMachine:
                     next_state = "done"
 
                 elif verdict == "fail_code_bug":
-                    outcome = route_p5c_code_bug(self.run.retry_counters, self._config.to_dict())
+                    outcome = route_test_analysis_code_bug(self.run.retry_counters, self._config.to_dict())
                     self._apply_outcome(outcome)
                     if outcome.decision == "escalate":
                         self._escalate(outcome.escalation_reason or "max_retries_exceeded")
@@ -1281,14 +1278,14 @@ class StateMachine:
                     next_state = "coding"
 
                 elif verdict == "fail_test_bug":
-                    outcome = route_p5c_test_bug(self.run.retry_counters, self._config.to_dict())
+                    outcome = route_test_analysis_test_bug(self.run.retry_counters, self._config.to_dict())
                     self._apply_outcome(outcome)
                     if outcome.decision == "escalate":
                         self._escalate(outcome.escalation_reason or "max_retries_exceeded")
                     next_state = "test_design"
 
                 elif verdict == "fail_spec_gap":
-                    outcome = route_p5c_spec_gap(self.run.retry_counters, self._config.to_dict())
+                    outcome = route_test_analysis_spec_gap(self.run.retry_counters, self._config.to_dict())
                     self._apply_outcome(outcome)
                     if outcome.decision == "escalate":
                         self._escalate(outcome.escalation_reason or "max_retries_exceeded")
@@ -1296,12 +1293,12 @@ class StateMachine:
                     next_state = "architecture"
 
                 elif verdict == "fail_ambiguous":
-                    outcome = route_p5c_ambiguous()
+                    outcome = route_test_analysis_ambiguous()
                     self._apply_outcome(outcome)
                     self._escalate(outcome.escalation_reason or "human_required")
 
                 else:  # "error"
-                    outcome = route_p5c_analyst_error(
+                    outcome = route_test_analysis_error(
                         self.run.retry_counters, self._config.to_dict()
                     )
                     self._apply_outcome(outcome)
@@ -1309,7 +1306,7 @@ class StateMachine:
                         self._escalate(outcome.escalation_reason or "human_required")
                     next_state = "test_execution"
 
-        self.run_phase6()
+        self.run_commit()
         assert code_art is not None
         assert test_suite is not None
         return req_doc, code_art, test_suite
@@ -1327,7 +1324,7 @@ class StateMachine:
         stripped_fields: list[str] | None = None
         cfg = self._config.to_dict()
         while True:
-            code_art = self.run_phase3(
+            code_art = self.run_coding(
                 req_doc, arch_doc, prompts["coder"], retry_context, code_fix_context,
                 entry_stripped_fields=stripped_fields,
             )
@@ -1335,7 +1332,7 @@ class StateMachine:
             stripped_fields = None
 
             try:
-                self.run_phase4a(req_doc, arch_doc, code_art, prompts["code_reviewer"])
+                self.run_code_review(req_doc, arch_doc, code_art, prompts["code_reviewer"])
             except _ReviewFailed as exc:
                 # Whitelist projection: only description + suggested_fix per finding.
                 projected = [
@@ -1354,7 +1351,7 @@ class StateMachine:
                 continue
 
             try:
-                self.run_phase4b(req_doc, code_art, prompts["security_reviewer"])
+                self.run_security_review(req_doc, code_art, prompts["security_reviewer"])
             except _ReviewFailed as exc:
                 projected = [
                     {"description": f.description, "suggested_fix": f.recommended_fix}

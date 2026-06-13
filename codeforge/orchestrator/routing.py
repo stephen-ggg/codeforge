@@ -1,15 +1,23 @@
 """
 orchestrator/routing.py — Codeforge routing table as code.
 
-Each function corresponds to a named row in the spec Part 3 routing table.
-No routing logic lives in the state machine — all verdict-to-action mapping is here.
+Each function corresponds to a named row in the spec routing table. No routing
+logic lives in the state machine — all verdict-to-action mapping is here.
+
+Routes are named after the phase they belong to (requirements, architecture,
+coding, code_review, security_review, test_design, test_execution,
+test_analysis, commit) rather than the old MVP phase numbers (P1, P2, ...).
+The `row_id` each handler emits follows the same convention so an
+``events.jsonl`` ``routing`` line names exactly what happened and which handler
+produced it — e.g. ``"code_review_pass_with_notes"`` maps directly to
+``route_code_review_pass`` here.
 
 Each handler returns a RoutingOutcome describing:
   - The RoutingDecision (what the orchestrator should do next)
   - Counter deltas (which counters to increment)
   - Counter resets (which counters to zero)
   - next_state: the state label for the event log
-  - row_id: the stable routing table row identifier
+  - row_id: the stable, self-describing routing table row identifier
 """
 
 from __future__ import annotations
@@ -58,7 +66,7 @@ def _get_limit(config: dict[str, Any], key: str, default: int = 3) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Cross-cutting routes
+# Cross-cutting routes (can fire in any phase)
 # ---------------------------------------------------------------------------
 
 def route_malformed(
@@ -66,17 +74,17 @@ def route_malformed(
     config: dict[str, Any],
     agent_id: str,
 ) -> RoutingOutcome:
-    """X-malformed: Layer 1 structural validation failure."""
+    """Layer 1 structural validation failure — re-prompt the same agent or escalate."""
     limit = _get_limit(config, "malformed_output_retries", 2)
     if _within_budget(counters.malformed_output, limit):
         return RoutingOutcome(
-            row_id="X-malformed",
+            row_id="malformed_output",
             decision="re_prompt_same_agent",
             next_state=f"{agent_id}_reprompt",
             counter_deltas={"malformed_output": 1},
         )
     return RoutingOutcome(
-        row_id="X-malformed",
+        row_id="malformed_output_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"malformed_output": 1},
@@ -85,9 +93,9 @@ def route_malformed(
 
 
 def route_block_flag() -> RoutingOutcome:
-    """X-block: block flag present — immediate halt."""
+    """Block flag present in agent output — immediate halt."""
     return RoutingOutcome(
-        row_id="X-block",
+        row_id="block_flag",
         decision="escalate",
         next_state="failed_escalated",
         escalation_reason="block_flag",
@@ -95,9 +103,9 @@ def route_block_flag() -> RoutingOutcome:
 
 
 def route_ceiling_exceeded() -> RoutingOutcome:
-    """X-ceiling: agent_call_count >= max_agent_calls_per_run."""
+    """agent_call_count >= max_agent_calls_per_run — global ceiling hit."""
     return RoutingOutcome(
-        row_id="X-ceiling",
+        row_id="global_ceiling_exceeded",
         decision="escalate",
         next_state="failed_escalated",
         escalation_reason="global_ceiling_exceeded",
@@ -107,7 +115,7 @@ def route_ceiling_exceeded() -> RoutingOutcome:
 def route_low_confidence(agent_id: str) -> RoutingOutcome:
     """Layer 3: confidence below threshold."""
     return RoutingOutcome(
-        row_id="X-lowconf",
+        row_id="low_confidence",
         decision="escalate",
         next_state="failed_escalated",
         escalation_reason="low_confidence",
@@ -116,49 +124,49 @@ def route_low_confidence(agent_id: str) -> RoutingOutcome:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 — Requirements
+# Requirements
 # ---------------------------------------------------------------------------
 
-def route_p1_clarify() -> RoutingOutcome:
-    """P1-clarify: needs_clarification — re-invoke analyst after human answers."""
+def route_requirements_clarify() -> RoutingOutcome:
+    """needs_clarification — re-invoke analyst after human answers."""
     return RoutingOutcome(
-        row_id="P1-clarify",
+        row_id="requirements_needs_clarification",
         decision="await_human",
         next_state="requirements_clarification",
     )
 
 
-def route_p1_complete() -> RoutingOutcome:
-    """P1-complete: status complete — human confirm gate."""
+def route_requirements_complete() -> RoutingOutcome:
+    """status complete — human confirm gate."""
     return RoutingOutcome(
-        row_id="P1-complete",
+        row_id="requirements_complete_awaiting_confirm",
         decision="await_human",
         next_state="requirements_confirm",
     )
 
 
-def route_p1_confirmed() -> RoutingOutcome:
-    """P1 confirmed: advance to Phase 2."""
+def route_requirements_confirmed() -> RoutingOutcome:
+    """Requirements confirmed by human: advance to architecture."""
     return RoutingOutcome(
-        row_id="P1-complete",
+        row_id="requirements_confirmed",
         decision="invoke_agent",
         next_state="architecture",
     )
 
 
-def route_p1_rejected() -> RoutingOutcome:
-    """P1 rejected: re-invoke requirements analyst with rejection feedback."""
+def route_requirements_rejected() -> RoutingOutcome:
+    """Requirements rejected by human: re-invoke analyst with rejection feedback."""
     return RoutingOutcome(
-        row_id="P1-complete",
+        row_id="requirements_rejected",
         decision="retry_same_agent",
         next_state="requirements_clarification",
     )
 
 
-def route_p1_lowconf() -> RoutingOutcome:
-    """P1-lowconf: confidence below threshold."""
+def route_requirements_lowconf() -> RoutingOutcome:
+    """Requirements confidence below threshold."""
     return RoutingOutcome(
-        row_id="P1-lowconf",
+        row_id="requirements_low_confidence",
         decision="escalate",
         next_state="failed_escalated",
         escalation_reason="low_confidence",
@@ -166,39 +174,39 @@ def route_p1_lowconf() -> RoutingOutcome:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 — Architecture
+# Architecture
 # ---------------------------------------------------------------------------
 
-def route_p2_valid(has_locked_decisions: bool) -> RoutingOutcome:
-    """P2-valid or P2-locked: architecture output passes validation."""
+def route_architecture_valid(has_locked_decisions: bool) -> RoutingOutcome:
+    """Architecture output passes validation (with or without locked tech decisions)."""
     if has_locked_decisions:
         return RoutingOutcome(
-            row_id="P2-locked",
+            row_id="architecture_locked_awaiting_confirm",
             decision="await_human",
             next_state="tech_decision_confirm",
         )
     return RoutingOutcome(
-        row_id="P2-valid",
+        row_id="architecture_valid",
         decision="invoke_agent",
         next_state="coding",
     )
 
 
-def route_p2_invalid(
+def route_architecture_invalid(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P2-invalid: arch_criteria_coverage or other validation fails."""
+    """arch_criteria_coverage or other validation fails — re-prompt or escalate."""
     limit = _get_limit(config, "architecture_validation_retries", 2)
     if _within_budget(counters.architecture_validation, limit):
         return RoutingOutcome(
-            row_id="P2-invalid",
+            row_id="architecture_invalid",
             decision="re_prompt_same_agent",
             next_state="architecture",
             counter_deltas={"architecture_validation": 1},
         )
     return RoutingOutcome(
-        row_id="P2-invalid",
+        row_id="architecture_invalid_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"architecture_validation": 1},
@@ -206,10 +214,10 @@ def route_p2_invalid(
     )
 
 
-def route_p2_lowconf() -> RoutingOutcome:
-    """P2-lowconf."""
+def route_architecture_lowconf() -> RoutingOutcome:
+    """Architecture confidence below threshold."""
     return RoutingOutcome(
-        row_id="P2-lowconf",
+        row_id="architecture_low_confidence",
         decision="escalate",
         next_state="failed_escalated",
         escalation_reason="low_confidence",
@@ -217,24 +225,24 @@ def route_p2_lowconf() -> RoutingOutcome:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 — Implementation (Coder)
+# Coding (Implementation)
 # ---------------------------------------------------------------------------
 
-def route_p3_no_requirements_txt(
+def route_coding_no_requirements_txt(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P3-no-req: requirements.txt absent."""
+    """requirements.txt absent from coder output — re-prompt or escalate."""
     limit = _get_limit(config, "coder_validation_retries", 2)
     if _within_budget(counters.coder_validation, limit):
         return RoutingOutcome(
-            row_id="P3-no-req",
+            row_id="coding_missing_requirements_txt",
             decision="re_prompt_same_agent",
             next_state="coding",
             counter_deltas={"coder_validation": 1},
         )
     return RoutingOutcome(
-        row_id="P3-no-req",
+        row_id="coding_missing_requirements_txt_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"coder_validation": 1},
@@ -242,21 +250,21 @@ def route_p3_no_requirements_txt(
     )
 
 
-def route_p3_ac_gap(
+def route_coding_ac_gap(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P3-ac-gap: must ACs not covered."""
+    """Must-have acceptance criteria not covered by code — re-prompt or escalate."""
     limit = _get_limit(config, "coder_validation_retries", 2)
     if _within_budget(counters.coder_validation, limit):
         return RoutingOutcome(
-            row_id="P3-ac-gap",
+            row_id="coding_acceptance_criteria_gap",
             decision="re_prompt_same_agent",
             next_state="coding",
             counter_deltas={"coder_validation": 1},
         )
     return RoutingOutcome(
-        row_id="P3-ac-gap",
+        row_id="coding_acceptance_criteria_gap_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"coder_validation": 1},
@@ -264,19 +272,19 @@ def route_p3_ac_gap(
     )
 
 
-def route_p3_valid() -> RoutingOutcome:
-    """P3-valid: coder output passes all gates — advance to Loop A."""
+def route_coding_valid() -> RoutingOutcome:
+    """Coder output passes all gates — advance to code review."""
     return RoutingOutcome(
-        row_id="P3-valid",
+        row_id="coding_valid",
         decision="invoke_agent",
         next_state="code_review",
     )
 
 
-def route_p3_lowconf() -> RoutingOutcome:
-    """P3-lowconf."""
+def route_coding_lowconf() -> RoutingOutcome:
+    """Coder confidence below threshold."""
     return RoutingOutcome(
-        row_id="P3-lowconf",
+        row_id="coding_low_confidence",
         decision="escalate",
         next_state="failed_escalated",
         escalation_reason="low_confidence",
@@ -284,24 +292,24 @@ def route_p3_lowconf() -> RoutingOutcome:
 
 
 # ---------------------------------------------------------------------------
-# Phase 4A — Code review (Loop A)
+# Code review
 # ---------------------------------------------------------------------------
 
-def route_p4a_fail(
+def route_code_review_fail(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P4A-fail: code review verdict fail — route back to coder."""
+    """Code review verdict fail — route back to coder or escalate."""
     limit = _get_limit(config, "code_review_loop", 3)
     if _within_budget(counters.code_review_loop, limit):
         return RoutingOutcome(
-            row_id="P4A-fail",
+            row_id="code_review_fail",
             decision="retry_same_agent",
             next_state="coding",
             counter_deltas={"code_review_loop": 1},
         )
     return RoutingOutcome(
-        row_id="P4A-exhausted",
+        row_id="code_review_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"code_review_loop": 1},
@@ -309,34 +317,34 @@ def route_p4a_fail(
     )
 
 
-def route_p4a_pass(has_notes: bool) -> RoutingOutcome:
-    """P4A-pass or P4A-notes: code review passes — advance to Loop B."""
+def route_code_review_pass(has_notes: bool) -> RoutingOutcome:
+    """Code review passes (optionally with notes) — advance to security review."""
     return RoutingOutcome(
-        row_id="P4A-notes" if has_notes else "P4A-pass",
+        row_id="code_review_pass_with_notes" if has_notes else "code_review_pass",
         decision="invoke_agent",
         next_state="security_review",
     )
 
 
 # ---------------------------------------------------------------------------
-# Phase 4B — Security review (Loop B)
+# Security review
 # ---------------------------------------------------------------------------
 
-def route_p4b_fail(
+def route_security_review_fail(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P4B-fail: security review verdict fail — back to coder, full Loop A again."""
+    """Security review verdict fail — back to coder (full code review again) or escalate."""
     limit = _get_limit(config, "security_review_loop", 3)
     if _within_budget(counters.security_review_loop, limit):
         return RoutingOutcome(
-            row_id="P4B-fail",
+            row_id="security_review_fail",
             decision="retry_same_agent",
             next_state="coding",
             counter_deltas={"security_review_loop": 1},
         )
     return RoutingOutcome(
-        row_id="P4B-exhausted",
+        row_id="security_review_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"security_review_loop": 1},
@@ -344,34 +352,34 @@ def route_p4b_fail(
     )
 
 
-def route_p4b_pass(has_notes: bool) -> RoutingOutcome:
-    """P4B-pass or P4B-notes: security review passes — advance to Phase 5."""
+def route_security_review_pass(has_notes: bool) -> RoutingOutcome:
+    """Security review passes (optionally with notes) — advance to test design."""
     return RoutingOutcome(
-        row_id="P4B-notes" if has_notes else "P4B-pass",
+        row_id="security_review_pass_with_notes" if has_notes else "security_review_pass",
         decision="invoke_agent",
         next_state="test_design",
     )
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 — Testing (Loop C)
+# Test design
 # ---------------------------------------------------------------------------
 
-def route_p5d_covmap_invalid(
+def route_test_design_covmap_invalid(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P5D-covmap: coverage map AC ids don't match requirements_doc."""
+    """Coverage map AC ids don't match requirements_doc — re-prompt or escalate."""
     limit = _get_limit(config, "test_loop", 2)
     if _within_budget(counters.test_loop, limit):
         return RoutingOutcome(
-            row_id="P5D-covmap",
+            row_id="test_design_coverage_map_invalid",
             decision="re_prompt_same_agent",
             next_state="test_design",
             counter_deltas={"test_loop": 1},
         )
     return RoutingOutcome(
-        row_id="P5C-exhausted",
+        row_id="test_design_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"test_loop": 1},
@@ -379,21 +387,34 @@ def route_p5d_covmap_invalid(
     )
 
 
-def route_p5e_error(
+def route_test_design_valid() -> RoutingOutcome:
+    """Test suite passes validation — advance to test execution."""
+    return RoutingOutcome(
+        row_id="test_design_valid",
+        decision="invoke_agent",
+        next_state="test_execution",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test execution (test runner)
+# ---------------------------------------------------------------------------
+
+def route_test_execution_error(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P5E-error: test runner infrastructure failure."""
+    """Test runner infrastructure failure — retry the runner or escalate."""
     limit = _get_limit(config, "infrastructure_retries", 3)
     if _within_budget(counters.infrastructure, limit):
         return RoutingOutcome(
-            row_id="P5E-error",
+            row_id="test_execution_infrastructure_error",
             decision="retry_same_agent",
             next_state="test_execution",
             counter_deltas={"infrastructure": 1},
         )
     return RoutingOutcome(
-        row_id="P5E-error",
+        row_id="test_execution_infrastructure_error_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"infrastructure": 1},
@@ -401,30 +422,34 @@ def route_p5e_error(
     )
 
 
-def route_p5c_pass() -> RoutingOutcome:
-    """P5C-pass: test analyst verdict pass — advance to Phase 6."""
+# ---------------------------------------------------------------------------
+# Test analysis
+# ---------------------------------------------------------------------------
+
+def route_test_analysis_pass() -> RoutingOutcome:
+    """Test analyst verdict pass — advance to commit."""
     return RoutingOutcome(
-        row_id="P5C-pass",
+        row_id="test_analysis_pass",
         decision="invoke_agent",
         next_state="commit",
     )
 
 
-def route_p5c_code_bug(
+def route_test_analysis_code_bug(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P5C-code-bug: test analyst fail_code_bug — back to coder."""
+    """Test analyst fail_code_bug — back to coder or escalate."""
     limit = _get_limit(config, "test_loop", 2)
     if _within_budget(counters.test_loop, limit):
         return RoutingOutcome(
-            row_id="P5C-code-bug",
+            row_id="test_analysis_code_bug",
             decision="retry_same_agent",
             next_state="coding",
             counter_deltas={"test_loop": 1},
         )
     return RoutingOutcome(
-        row_id="P5C-exhausted",
+        row_id="test_analysis_code_bug_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"test_loop": 1},
@@ -432,21 +457,21 @@ def route_p5c_code_bug(
     )
 
 
-def route_p5c_test_bug(
+def route_test_analysis_test_bug(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P5C-test-bug: test analyst fail_test_bug — back to test designer."""
+    """Test analyst fail_test_bug — back to test designer or escalate."""
     limit = _get_limit(config, "test_loop", 2)
     if _within_budget(counters.test_loop, limit):
         return RoutingOutcome(
-            row_id="P5C-test-bug",
+            row_id="test_analysis_test_bug",
             decision="retry_same_agent",
             next_state="test_design",
             counter_deltas={"test_loop": 1},
         )
     return RoutingOutcome(
-        row_id="P5C-exhausted",
+        row_id="test_analysis_test_bug_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"test_loop": 1},
@@ -454,15 +479,15 @@ def route_p5c_test_bug(
     )
 
 
-def route_p5c_spec_gap(
+def route_test_analysis_spec_gap(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P5C-spec-gap: test analyst fail_spec_gap — back to architecture designer."""
+    """Test analyst fail_spec_gap — back to architecture designer or escalate."""
     limit = _get_limit(config, "test_loop", 2)
     if _within_budget(counters.test_loop, limit):
         return RoutingOutcome(
-            row_id="P5C-spec-gap",
+            row_id="test_analysis_spec_gap",
             decision="retry_same_agent",
             next_state="architecture",
             counter_deltas={"test_loop": 1},
@@ -470,7 +495,7 @@ def route_p5c_spec_gap(
             counter_resets=["code_review_loop", "security_review_loop"],
         )
     return RoutingOutcome(
-        row_id="P5C-exhausted",
+        row_id="test_analysis_spec_gap_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"test_loop": 1},
@@ -478,31 +503,31 @@ def route_p5c_spec_gap(
     )
 
 
-def route_p5c_ambiguous() -> RoutingOutcome:
-    """P5C-ambiguous: test analyst fail_ambiguous — escalate to human."""
+def route_test_analysis_ambiguous() -> RoutingOutcome:
+    """Test analyst fail_ambiguous — escalate to human."""
     return RoutingOutcome(
-        row_id="P5C-ambiguous",
+        row_id="test_analysis_ambiguous",
         decision="escalate",
         next_state="failed_escalated",
         escalation_reason="human_required",
     )
 
 
-def route_p5c_analyst_error(
+def route_test_analysis_error(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P5C-error: test analyst verdict error — re-trigger test runner."""
+    """Test analyst verdict error — re-trigger test runner or escalate."""
     limit = _get_limit(config, "infrastructure_retries", 3)
     if _within_budget(counters.infrastructure, limit):
         return RoutingOutcome(
-            row_id="P5C-error",
+            row_id="test_analysis_runner_error",
             decision="retry_same_agent",
             next_state="test_execution",
             counter_deltas={"infrastructure": 1},
         )
     return RoutingOutcome(
-        row_id="P5C-error",
+        row_id="test_analysis_runner_error_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"infrastructure": 1},
@@ -511,24 +536,24 @@ def route_p5c_analyst_error(
 
 
 # ---------------------------------------------------------------------------
-# Phase 6 — Commit
+# Commit
 # ---------------------------------------------------------------------------
 
-def route_p6_state_fail(
+def route_commit_state_fail(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P6-state-fail: codeforge state commit fails."""
+    """Codeforge state commit fails — retry or escalate."""
     limit = _get_limit(config, "codeforge_state_commit", 3)
     if _within_budget(counters.codeforge_state_commit, limit):
         return RoutingOutcome(
-            row_id="P6-state-fail",
+            row_id="commit_state_fail",
             decision="retry_same_agent",
             next_state="commit",
             counter_deltas={"codeforge_state_commit": 1},
         )
     return RoutingOutcome(
-        row_id="P6-state-fail",
+        row_id="commit_state_fail_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"codeforge_state_commit": 1},
@@ -536,21 +561,21 @@ def route_p6_state_fail(
     )
 
 
-def route_p6_src_fail(
+def route_commit_src_fail(
     counters: RetryCounters,
     config: dict[str, Any],
 ) -> RoutingOutcome:
-    """P6-src-fail: source code commit fails."""
+    """Source code commit fails — retry or escalate."""
     limit = _get_limit(config, "source_code_commit", 3)
     if _within_budget(counters.source_code_commit, limit):
         return RoutingOutcome(
-            row_id="P6-src-fail",
+            row_id="commit_source_fail",
             decision="retry_same_agent",
             next_state="commit",
             counter_deltas={"source_code_commit": 1},
         )
     return RoutingOutcome(
-        row_id="P6-src-fail",
+        row_id="commit_source_fail_exhausted",
         decision="escalate",
         next_state="failed_escalated",
         counter_deltas={"source_code_commit": 1},
@@ -558,10 +583,10 @@ def route_p6_src_fail(
     )
 
 
-def route_p6_success() -> RoutingOutcome:
-    """P6-src-ok: both commits landed — codeforge run succeeded."""
+def route_commit_success() -> RoutingOutcome:
+    """Both commits landed — codeforge run succeeded."""
     return RoutingOutcome(
-        row_id="P6-src-ok",
+        row_id="commit_success",
         decision="succeed",
         next_state="succeeded",
     )
