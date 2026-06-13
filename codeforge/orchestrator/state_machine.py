@@ -1078,7 +1078,7 @@ class StateMachine:
             if not p.exists():
                 raise FileNotFoundError(
                     f"Rendered prompt not found: {p}. "
-                    "Run `python -m codeforge.config.prompts.prompt_builder` to build prompts."
+                    "Run `python -m codeforge.config.prompts.build` to build prompts."
                 )
             prompts[aid] = p.read_text(encoding="utf-8")
         return prompts
