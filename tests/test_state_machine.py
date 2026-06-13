@@ -6,12 +6,16 @@ before the Phase 6 flush. Everything staged during a run lives in memory only.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from codeforge.config.config_loader import ConfigSnapshot
-from codeforge.orchestrator.state_machine import StateMachine
+from codeforge.orchestrator.gates import GateResult
+from codeforge.orchestrator.routing import route_low_confidence
+from codeforge.orchestrator.state_machine import EscalationError, StateMachine
+from codeforge.schemas.contracts import AgentOutput, Flag
 
 
 @pytest.fixture
@@ -19,6 +23,12 @@ def sm(minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path) -> 
     machine = StateMachine(minimal_config, project_dir, run_log_dir)
     machine.start_run("new_project", "a brief")
     return machine
+
+
+def _gate_events(run_log_dir: Path, run_id: str) -> list[dict]:
+    path = run_log_dir / run_id / "events.jsonl"
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    return [e for e in events if e.get("event_type") == "gate"]
 
 
 def test_start_run_initialises_components(sm: StateMachine) -> None:
@@ -75,3 +85,111 @@ def test_escalation_without_phase_sets_none(sm: StateMachine) -> None:
 
     event = sm.run.escalations[0]
     assert event.suggested_reentry_state is None
+
+
+# ----------------------------------------------------------------------
+# Terminal policy escalation: rich, linked diagnostics
+# ----------------------------------------------------------------------
+
+
+def _block_output(summary: str) -> AgentOutput:
+    """AgentOutput carrying a severity=block flag and a summary-bearing payload."""
+    return AgentOutput(
+        output={"verdict": "error", "summary": summary},
+        assumptions_made=[],
+        confidence=0.97,
+        unresolved_flags=[
+            Flag(
+                id="FLAG-001",
+                description="pytest-json-report plugin is not installed",
+                severity="block",
+                suggested_action="Add pytest-json-report to test deps",
+            )
+        ],
+    )
+
+
+def _block_gate_result(output: AgentOutput) -> GateResult:
+    gr = GateResult()
+    gr.policy_passed = False
+    gr.escalation_reason = "block_flag"
+    gr.policy_gate_rule = "block_flag_present"
+    gr.parsed_output = output
+    return gr
+
+
+def test_block_flag_persists_links_and_enriches(sm: StateMachine, run_log_dir: Path) -> None:
+    summary = "pytest exited with a fatal argument error before collecting any tests."
+    output = _block_output(summary)
+    gr = _block_gate_result(output)
+
+    with pytest.raises(EscalationError) as exc:
+        sm._handle_policy_escalation(
+            gr, "test_analyst", "test_analysis", route_low_confidence("test_analyst")
+        )
+    assert exc.value.reason == "block_flag"
+
+    # Gate event is self-sufficient and linked to a real artifact id.
+    gate = _gate_events(run_log_dir, sm.run.run_id)[-1]
+    assert gate["rule"] == "block_flag_present"
+    assert gate["passed"] is False
+    assert gate["source_agent"] == "test_analyst"
+    artifact_id = gate["artifact_ref"]
+    assert artifact_id
+    assert "FLAG-001" in gate["detail"]
+    assert "pytest-json-report plugin is not installed" in gate["detail"]
+    assert summary in gate["detail"]
+
+    # The escalation record points back to the same artifact.
+    assert sm.run.escalations[-1].agent_output_ref == artifact_id
+
+    # The artifact is persisted under failed_artifacts/ (recoverable for debugging).
+    assert (run_log_dir / "failed_artifacts" / f"{artifact_id}.json").exists()
+
+    # Side-effect guard: the blocked output must NOT leak into consumer queries
+    # (assembler / resume) and must NOT occupy the normal artifacts slot.
+    assert sm._artifact_store.exists("test_analysis") is False
+    assert sm._artifact_store.get_latest("test_analysis") is None
+    assert "test_analysis" not in sm.run.artifacts
+
+
+def test_format_policy_detail_without_summary(sm: StateMachine) -> None:
+    """Payloads lacking a summary degrade gracefully — no crash, segment omitted."""
+    output = AgentOutput(
+        output={"verdict": "error"},  # no 'summary' key
+        assumptions_made=[],
+        confidence=0.5,
+        unresolved_flags=[Flag(id="F1", description="boom", severity="block")],
+    )
+    gr = _block_gate_result(output)
+
+    detail = sm._format_policy_detail(gr, output)
+    assert "escalation_reason=block_flag" in detail
+    assert "F1" in detail
+    assert "summary=" not in detail
+
+
+def test_low_confidence_detail_includes_confidence(sm: StateMachine, run_log_dir: Path) -> None:
+    output = AgentOutput(
+        output={"verdict": "error", "summary": "uncertain result"},
+        assumptions_made=[],
+        confidence=0.10,
+        unresolved_flags=[],
+    )
+    gr = GateResult()
+    gr.policy_passed = False
+    gr.escalation_reason = "low_confidence"
+    gr.policy_gate_rule = "confidence_threshold"
+    gr.parsed_output = output
+
+    with pytest.raises(EscalationError) as exc:
+        sm._handle_policy_escalation(
+            gr, "test_analyst", "test_analysis", route_low_confidence("test_analyst")
+        )
+    assert exc.value.reason == "low_confidence"
+
+    gate = _gate_events(run_log_dir, sm.run.run_id)[-1]
+    assert gate["rule"] == "confidence_threshold"
+    assert "confidence=0.1" in gate["detail"]
+    assert "uncertain result" in gate["detail"]
+    assert gate["artifact_ref"]

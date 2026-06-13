@@ -19,14 +19,14 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.firewall.assembler import ContextAssembler
 from codeforge.firewall.manifest import load_manifest
 from codeforge.model_router.router import ModelRouter
 from codeforge.orchestrator.event_log import EventLog
-from codeforge.orchestrator.gates import GateEvaluator
+from codeforge.orchestrator.gates import GateEvaluator, GateResult
 from codeforge.orchestrator.pending_writes import PendingWrites
 from codeforge.orchestrator.routing import (
     RoutingOutcome,
@@ -364,6 +364,102 @@ class StateMachine:
             schema_version=meta.schema_version,
         )
 
+    # ------------------------------------------------------------------
+    # Terminal policy escalation (block flag / low confidence)
+    # ------------------------------------------------------------------
+
+    def _handle_policy_escalation(
+        self,
+        gate_result: GateResult,
+        agent_id: str,
+        artifact_type: str,
+        low_confidence_outcome: RoutingOutcome,
+    ) -> NoReturn:
+        """
+        Persist the offending output, emit a richly-detailed failing gate event linked
+        to it, then escalate. Shared by all agent phases for block_flag / low_confidence.
+
+        The output is written to the ISOLATED failed-artifacts area (not artifacts/) so
+        it never leaks into get_latest/exists — the assembler and resume must not pick up
+        a blocked output as if it were valid. The only links to it are the gate event's
+        artifact_ref and the escalation's agent_output_ref.
+        """
+        output = gate_result.parsed_output
+        assert output is not None  # always set by GateEvaluator on a policy failure
+
+        artifact_id = self._write_failed_artifact(artifact_type, agent_id, output)
+        self.event_log.emit_gate(
+            rule=gate_result.policy_gate_rule,  # type: ignore[arg-type]
+            passed=False,
+            source_agent=cast(LogActor, agent_id),
+            counters=self._counters_snap(),
+            detail=self._format_policy_detail(gate_result, output),
+            artifact_ref=artifact_id,
+        )
+
+        if gate_result.escalation_reason == "block_flag":
+            self._apply_outcome(route_block_flag())
+            self._escalate("block_flag", context=artifact_id)
+        self._apply_outcome(low_confidence_outcome)
+        self._escalate("low_confidence", context=artifact_id)
+
+    def _write_failed_artifact(
+        self,
+        artifact_type: str,
+        agent_id: str,
+        output: Any,
+    ) -> str:
+        """Write a blocked/low-confidence output to failed_artifacts/ and return its id."""
+        typed_artifact_type = cast(ArtifactType, artifact_type)
+        typed_agent_id = cast(AgentId, agent_id)
+
+        manifest = load_manifest()
+        access = manifest.get_artifact_access(typed_artifact_type)
+        allowed = list(access.allowed_consumers if access else [])
+        forbidden = list(access.forbidden_consumers if access else [])
+
+        meta = self._artifact_store.write_failed(
+            artifact_type=typed_artifact_type,
+            produced_by=typed_agent_id,
+            output=output,
+            run_id=self.run.run_id,
+            codeforge_version=self._config.name,
+            schema_version="1.0.0",
+            allowed_consumers=allowed,
+            forbidden_consumers=forbidden,
+        )
+        return meta.artifact_id
+
+    def _format_policy_detail(self, gate_result: GateResult, output: Any) -> str:
+        """
+        Build a self-sufficient gate detail string so the events.jsonl line alone is
+        enough to diagnose the escalation: the flag reason(s) and the problem summary.
+        """
+        parts = [f"escalation_reason={gate_result.escalation_reason}"]
+
+        if gate_result.escalation_reason == "block_flag":
+            for flag in output.unresolved_flags:
+                if flag.severity != "block":
+                    continue
+                seg = f"flag={flag.id}: {flag.description}"
+                if flag.suggested_action:
+                    seg += f" (suggested: {flag.suggested_action})"
+                parts.append(seg)
+        else:
+            parts.append(f"confidence={output.confidence}")
+
+        payload = output.output
+        summary = (
+            payload.get("summary") if isinstance(payload, dict)
+            else getattr(payload, "summary", None)
+        )
+        if isinstance(summary, str) and summary:
+            if len(summary) > 300:
+                summary = summary[:297] + "..."
+            parts.append(f"summary={summary}")
+
+        return " | ".join(parts)
+
     def _record_assumptions(self, output: Any, agent_id: AgentId) -> None:
         """Append recordable assumptions from agent output to assumptions_log."""
         from codeforge.schemas.contracts import AssumptionEntry
@@ -448,11 +544,10 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("requirements_analyst"))
-                self._escalate("low_confidence")
+                self._handle_policy_escalation(
+                    gate_result, "requirements_analyst", "requirements_doc",
+                    route_low_confidence("requirements_analyst"),
+                )
 
             # Parse output
             data = json.loads(raw)
@@ -565,11 +660,10 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_architecture_lowconf())
-                self._escalate("low_confidence")
+                self._handle_policy_escalation(
+                    gate_result, "architecture_designer", "architecture_doc",
+                    route_architecture_lowconf(),
+                )
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -707,11 +801,10 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("coder"))
-                self._escalate("low_confidence")
+                self._handle_policy_escalation(
+                    gate_result, "coder", "code_artifact",
+                    route_low_confidence("coder"),
+                )
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -775,11 +868,10 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("code_reviewer"))
-                self._escalate("low_confidence")
+                self._handle_policy_escalation(
+                    gate_result, "code_reviewer", "review_report",
+                    route_low_confidence("code_reviewer"),
+                )
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -857,11 +949,10 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("security_reviewer"))
-                self._escalate("low_confidence")
+                self._handle_policy_escalation(
+                    gate_result, "security_reviewer", "security_report",
+                    route_low_confidence("security_reviewer"),
+                )
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -960,11 +1051,10 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("test_designer"))
-                self._escalate("low_confidence")
+                self._handle_policy_escalation(
+                    gate_result, "test_designer", "test_suite",
+                    route_low_confidence("test_designer"),
+                )
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)
@@ -1032,11 +1122,10 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("test_analyst"))
-                self._escalate("low_confidence")
+                self._handle_policy_escalation(
+                    gate_result, "test_analyst", "test_analysis",
+                    route_low_confidence("test_analyst"),
+                )
 
             data = json.loads(raw)
             output: AgentOutput[Any] = AgentOutput(**data)

@@ -23,6 +23,7 @@ from codeforge.schemas.contracts import (
     ContractViolationRePrompt,
     CountersSnapshot,
     EscalationReason,
+    GateRule,
     MalformedOutputRePrompt,
     RequirementsDoc,
     RetryCounters,
@@ -46,6 +47,11 @@ class GateResult:
         self.violation_reprompt: ContractViolationRePrompt | None = None
         self.escalation_reason: EscalationReason | None = None
         self.verdict_forced: bool = False  # D9: error/critical severity forced fail
+        # Populated on a terminal policy failure (block_flag / low_confidence) so the
+        # state machine can persist the offending output and emit the failing gate
+        # event with a real artifact_ref. See GateEvaluator.evaluate().
+        self.parsed_output: AgentOutput[Any] | None = None
+        self.policy_gate_rule: GateRule | None = None
 
     @property
     def passed(self) -> bool:
@@ -185,16 +191,14 @@ class GateEvaluator:
         )
 
         if not policy_ok:
-            block_rule: GateRuleType = "block_flag_present"
-            conf_rule: GateRuleType = "confidence_threshold"
-            l3_rule = block_rule if escalation_reason == "block_flag" else conf_rule
-            self._log.emit_gate(
-                rule=l3_rule,
-                passed=False,
-                source_agent=agent_id,
-                counters=counters_snap,
-                detail=f"escalation_reason={escalation_reason}",
-            )
+            # Asymmetry: the PASSING policy gate is emitted below, but the FAILING one
+            # is emitted by the state machine (_handle_policy_escalation) after it has
+            # persisted the offending output — so the gate event can carry a real
+            # artifact_ref and a self-sufficient detail (flag reason + summary).
+            block_rule: GateRule = "block_flag_present"
+            conf_rule: GateRule = "confidence_threshold"
+            result.policy_gate_rule = block_rule if escalation_reason == "block_flag" else conf_rule
+            result.parsed_output = output
             result.policy_passed = False
             result.escalation_reason = escalation_reason
             return result
