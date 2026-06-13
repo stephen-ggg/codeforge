@@ -196,6 +196,10 @@ class HumanInteraction:
         print(f"Context: {event.agent_output_ref}")
         print(f"Time:    {event.triggered_at}")
 
+        suggestion = getattr(event, "suggested_reentry_state", None)
+        if suggestion:
+            print(f"Failed during: {suggestion}")
+
         reentry_options = _REENTRY_BY_REASON.get(event.reason, [])
 
         print("\nOptions:")
@@ -213,7 +217,7 @@ class HumanInteraction:
             notes = input("Notes (reason for rejection): ").strip()
             return EscalationResolution(outcome="rejected", human_notes=notes)
 
-        reentry_state = _prompt_reentry_state(reentry_options)
+        reentry_state = _prompt_reentry_state(reentry_options, default=suggestion)
 
         if choice == "3":
             change_summary = input("Describe the change you are making: ").strip()
@@ -252,15 +256,32 @@ def _as_clarification_question(raw: Any) -> ClarificationQuestion:
     return ClarificationQuestion(**raw)
 
 
-def _prompt_reentry_state(options: list[str]) -> str:
-    """Prompt the operator to choose a reentry state, with validation."""
+def _prompt_reentry_state(options: list[str], default: str | None = None) -> str:
+    """Prompt the operator to choose a reentry state, with numbered options and an
+    optional default (press Enter to accept)."""
     if not options:
         print("\nNo automatic reentry available. Defaulting to requirements_clarification.")
         return "requirements_clarification"
 
-    print(f"\nAvailable reentry states: {', '.join(options)}")
+    print("\nAvailable reentry states:")
+    for i, opt in enumerate(options, 1):
+        marker = " ← suggested" if opt == default else ""
+        print(f"  {i}. {opt}{marker}")
+
+    prompt = f"Reentry state [1-{len(options)}]"
+    if default and default in options:
+        prompt += f" (Enter = {default})"
+    prompt += ": "
+
     while True:
-        choice = input("Reentry state: ").strip()
-        if choice in options:
-            return choice
-        print(f"Please choose one of: {', '.join(options)}")
+        raw = input(prompt).strip()
+        if raw == "" and default and default in options:
+            return default
+        try:
+            idx = int(raw) - 1
+            if 0 <= idx < len(options):
+                return options[idx]
+        except ValueError:
+            if raw in options:
+                return raw
+        print(f"Please enter a number 1–{len(options)} or press Enter for the default.")

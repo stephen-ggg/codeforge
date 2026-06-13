@@ -320,6 +320,7 @@ class EscalationEvent(BaseModel):
     agent_output_ref: str                   # artifact_id that triggered this
     resolved: bool
     resolution: EscalationResolution | None = None
+    suggested_reentry_state: ReentryState | None = None  # phase that was running when escalation fired
 
 
 # ===========================================================================

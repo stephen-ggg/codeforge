@@ -132,6 +132,10 @@ class StateMachine:
         self._router: ModelRouter | None = None
         self._assembler: ContextAssembler | None = None
 
+        # Tracks which phase is currently executing so escalation events can carry
+        # a suggested reentry state for the human operator.
+        self._current_phase: "ReentryState | None" = None
+
     # ------------------------------------------------------------------
     # Run lifecycle
     # ------------------------------------------------------------------
@@ -265,6 +269,7 @@ class StateMachine:
             reason=reason,
             agent_output_ref=context,
             resolved=False,
+            suggested_reentry_state=self._current_phase,
         )
         self.run.escalations.append(event)
         self.run.status = "failed_escalated"
@@ -392,6 +397,7 @@ class StateMachine:
         Returns the confirmed RequirementsDoc.
         human_interface: object with ask_clarification(), confirm_requirements() methods.
         """
+        self._current_phase = "requirements_clarification"
         from codeforge.agents.requirements_analyst import RequirementsAnalystAgent
         from codeforge.schemas.contracts import AgentOutput
 
@@ -503,6 +509,7 @@ class StateMachine:
         spec_gap_context: dict[str, Any] | None = None,
     ) -> ArchitectureDoc:
         """Drive Phase 2 (architecture design) to completion."""
+        self._current_phase = "architecture"
         from codeforge.agents.architecture_designer import ArchitectureDesignerAgent
         from codeforge.schemas.contracts import AgentOutput, InterfaceManifest
 
@@ -637,6 +644,7 @@ class StateMachine:
         entry_stripped_fields: list[str] | None = None,
     ) -> CodeArtifact:
         """Drive Phase 3 (coding) to completion."""
+        self._current_phase = "coding"
         from codeforge.agents.coder import CoderAgent
         from codeforge.schemas.contracts import AgentOutput
 
@@ -728,6 +736,7 @@ class StateMachine:
         system_prompt: str,
     ) -> ReviewReport:
         """Drive Loop A (code review) to completion. Returns passing ReviewReport."""
+        self._current_phase = "code_review"
         from codeforge.agents.code_reviewer import CodeReviewerAgent
         from codeforge.schemas.contracts import AgentOutput
 
@@ -809,6 +818,7 @@ class StateMachine:
         system_prompt: str,
     ) -> SecurityReport:
         """Drive Loop B (security review) to completion. Returns passing SecurityReport."""
+        self._current_phase = "code_review"
         from codeforge.agents.security_reviewer import SecurityReviewerAgent
         from codeforge.schemas.contracts import AgentOutput
 
@@ -891,6 +901,7 @@ class StateMachine:
         retry_context: dict[str, Any] | None = None,
     ) -> TestSuite:
         """Drive test design to completion."""
+        self._current_phase = "test_design"
         from codeforge.agents.test_designer import TestDesignerAgent
         from codeforge.schemas.contracts import AgentOutput
 
@@ -983,6 +994,7 @@ class StateMachine:
         system_prompt: str,
     ) -> TestAnalysis:
         """Drive test analysis to completion."""
+        self._current_phase = "test_execution"
         from codeforge.agents.test_analyst import TestAnalystAgent
         from codeforge.schemas.contracts import AgentOutput
 
@@ -1184,6 +1196,7 @@ class StateMachine:
                 next_state = "test_execution"
 
             elif next_state == "test_execution":
+                self._current_phase = "test_execution"
                 assert code_art is not None
                 assert test_suite is not None
                 runner = TestRunner(self._config)

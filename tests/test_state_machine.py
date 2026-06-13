@@ -46,3 +46,32 @@ def test_event_log_writes_to_run_log_not_project_state(
     state_dir = project_dir / "project-state"
     on_disk = list(state_dir.rglob("*")) if state_dir.exists() else []
     assert on_disk == [], f"project-state/ should be empty before Phase 6: {on_disk}"
+
+
+def test_escalation_captures_current_phase(sm: StateMachine) -> None:
+    """_escalate() must stamp the phase that was running onto the EscalationEvent so
+    handle_escalation() can suggest the correct reentry state to the operator."""
+    import pytest
+    from codeforge.orchestrator.state_machine import EscalationError
+
+    sm._current_phase = "coding"
+    with pytest.raises(EscalationError):
+        sm._escalate("max_retries_exceeded", "test context")
+
+    assert len(sm.run.escalations) == 1
+    event = sm.run.escalations[0]
+    assert event.suggested_reentry_state == "coding"
+
+
+def test_escalation_without_phase_sets_none(sm: StateMachine) -> None:
+    """When _current_phase is not set (e.g. pre-run escalation), suggested_reentry_state
+    is None — handle_escalation() omits the suggestion gracefully."""
+    import pytest
+    from codeforge.orchestrator.state_machine import EscalationError
+
+    assert sm._current_phase is None
+    with pytest.raises(EscalationError):
+        sm._escalate("global_ceiling_exceeded", "")
+
+    event = sm.run.escalations[0]
+    assert event.suggested_reentry_state is None
