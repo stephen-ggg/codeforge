@@ -40,8 +40,8 @@ def _env_fix_context() -> dict:
         "trigger": "test_error_environment",
         "test_summary": "pytest could not collect tests",
         "environment_findings": [
-            {"recommended_action": "Add pytest-json-report>=1.5 to requirements-test.txt",
-             "evidence": "pytest: unrecognized arguments --json-report"}
+            {"recommended_action": "Add httpx>=0.27 to requirements-test.txt",
+             "evidence": "ModuleNotFoundError: No module named 'httpx' during collection"}
         ],
     }
 
@@ -57,7 +57,7 @@ def test_env_fix_context_surfaced_in_payload() -> None:
     payload = json.loads(agent.build_user_turn(pkg, reprompt=None))
 
     assert payload["env_fix_context"]["trigger"] == "test_error_environment"
-    assert "pytest-json-report" in (
+    assert "httpx" in (
         payload["env_fix_context"]["environment_findings"][0]["recommended_action"]
     )
 

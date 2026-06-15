@@ -606,7 +606,9 @@ _RECOVERY_ROUTES: dict[str, RecoveryRoute] = {
         "coding", "dependency_repair", "dependency_repair", "test_error_runtime_dep_repair"),
     "runtime_dep_install_failed": RecoveryRoute(
         "coding", "dependency_repair", "dependency_repair", "test_error_runtime_dep_repair"),
-    "no_results_json": RecoveryRoute(
+    "test_dep_install_failed": RecoveryRoute(
+        "test_design", "environment_repair", "environment_repair", "test_error_test_infra_repair"),
+    "no_results_report": RecoveryRoute(
         "test_design", "environment_repair", "environment_repair", "test_error_test_infra_repair"),
     "pytest_exit_error": RecoveryRoute(
         "test_design", "environment_repair", "environment_repair", "test_error_test_infra_repair"),

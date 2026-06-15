@@ -9,11 +9,17 @@ Container layout (fixed, not configurable per run in MVP):
   /workspace/src/<path>             — source files (from code_artifact, excluding requirements.txt)
   /workspace/tests/<path>           — test files (test_cases[].code + test_infrastructure files)
 
+Results are emitted via pytest core's built-in --junit-xml reporter — no third-party
+plugin — so a generated requirements file pinning a different pytest cannot break the
+results channel. overall_status is derived from pytest's real process exit code, not from
+anything recorded inside the report, so a harness that never starts is distinguishable
+from tests that ran and failed.
+
 Exit conventions:
   overall_status: "pass"  — all tests passed (pytest exit 0)
   overall_status: "fail"  — tests ran, some failed (pytest exit 1)
   overall_status: "error" — infrastructure failure: missing requirements.txt, pip install failed,
-                            Docker exec failure, missing results.json, or non-0/1 pytest exit code.
+                            Docker exec failure, missing results.xml, or non-0/1 pytest exit code.
 
 InfrastructureError is raised (not returned) when the sandbox image is absent — the
 orchestrator routes this to the infrastructure counter rather than the test_loop counter.
@@ -22,11 +28,12 @@ orchestrator routes this to the infrastructure counter rather than the test_loop
 from __future__ import annotations
 
 import io
-import json
+import re
 import tarfile
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal, cast
+from typing import Any, Literal
+from xml.etree import ElementTree
 
 import docker
 import docker.errors
@@ -106,32 +113,39 @@ class TestRunner:
                     stderr=_decode(out)[-4096:],
                 )
 
-            # Install test-only deps after runtime deps
+            # Install test-only deps after runtime deps. Check the exit code: a failed
+            # test-dep install otherwise surfaces later as an opaque "no report" error.
             if has_req_test:
-                container.exec_run(
+                exit_code, out = container.exec_run(
                     "pip install --quiet -r /workspace/requirements-test.txt",
                     workdir="/workspace",
                 )
+                if exit_code != 0:
+                    return _error_result(
+                        started_at, sandbox_image, "test_dep_install_failed",
+                        stderr=_decode(out)[-4096:],
+                    )
 
-            # Run pytest with JSON report
-            _, out = container.exec_run(
-                "pytest tests/ --json-report --json-report-file=/workspace/results.json -v",
+            # Run pytest, emitting a JUnit XML report via pytest core (no plugin).
+            exit_code, out = container.exec_run(
+                "pytest tests/ --junit-xml=/workspace/results.xml -o junit_family=xunit2 -v",
                 workdir="/workspace",
             )
             pytest_stdout = _decode(out)
 
-            # Extract results.json from container
-            results_raw = _extract_file(container, "/workspace/results.json")
+            # Extract results.xml from container
+            results_raw = _extract_file(container, "/workspace/results.xml")
 
             if results_raw is None:
                 return _error_result(
-                    started_at, sandbox_image, "no_results_json",
+                    started_at, sandbox_image, "no_results_report",
                     stdout=pytest_stdout[-4096:],
-                    stderr="pytest did not produce results.json",
+                    stderr=f"pytest produced no JUnit XML report (exit={exit_code})",
                 )
 
-            return _parse_pytest_report(
+            return _parse_junit_report(
                 results_raw,
+                exit_code,
                 started_at,
                 sandbox_image,
                 pytest_stdout,
@@ -221,64 +235,57 @@ def _extract_file(container: Any, container_path: str) -> str | None:
 # Result construction helpers
 # ---------------------------------------------------------------------------
 
-def _parse_pytest_report(
+def _parse_junit_report(
     results_raw: str,
+    exit_code: int,
     started_at: str,
     sandbox_image: str,
     pytest_stdout: str,
     test_suite: TestSuite,
 ) -> TestRunnerResults:
     try:
-        data = json.loads(results_raw)
-    except json.JSONDecodeError:
+        root = ElementTree.fromstring(results_raw)
+    except ElementTree.ParseError:
         return _error_result(
             started_at, sandbox_image, "results_parse_error",
             stdout=pytest_stdout[-4096:],
-            stderr="Failed to parse results.json as JSON",
+            stderr="Failed to parse results.xml as JUnit XML",
         )
 
-    # Build file path → test_case_id lookup so we can map pytest nodeids back to TC ids
+    # Build file path → test_case_id lookup so we can map JUnit classnames back to TC ids
     path_to_case_id: dict[str, str] = {}
     for tc in test_suite.test_cases:
         for f in tc.code:
             path_to_case_id[f.path] = tc.id
 
-    _status_map = {
-        "passed": "pass",
-        "failed": "fail",
-        "error": "error",
-        "skipped": "skipped",
-    }
-
     test_results: list[TestResult] = []
-    for test in data.get("tests", []):
-        nodeid: str = test.get("nodeid", "")
-        outcome: str = test.get("outcome", "error")
-        duration_ms: float = test.get("duration", 0.0) * 1000
-        status = cast(
-            Literal["pass", "fail", "error", "skipped"],
-            _status_map.get(outcome, "error"),
-        )
+    for case in root.iter("testcase"):
+        classname = case.get("classname", "")
+        name = case.get("name", "")
+        duration_ms = float(case.get("time", "0") or 0) * 1000
 
-        # Best-effort: extract file part from nodeid to resolve test_case_id
-        file_part = nodeid.split("::")[0] if "::" in nodeid else nodeid
-        rel_path = file_part.removeprefix("tests/").lstrip("/")
-        test_case_id = path_to_case_id.get(rel_path, nodeid)
+        rel_path = _classname_to_path(classname or name)
+        test_case_id = path_to_case_id.get(rel_path, f"{classname}::{name}" if classname else name)
 
-        # Error detail from pytest's call block
-        call = test.get("call", {})
-        longrepr = call.get("longrepr")
+        failure = case.find("failure")
+        error = case.find("error")
+        skipped = case.find("skipped")
+
+        status: Literal["pass", "fail", "error", "skipped"]
         error_message: str | None = None
         stack_trace: str | None = None
-        if longrepr and status in ("fail", "error"):
-            if isinstance(longrepr, str):
-                lines = longrepr.splitlines()
-                error_message = lines[-1] if lines else longrepr
-                stack_trace = longrepr
-            elif isinstance(longrepr, dict):
-                crash = longrepr.get("reprcrash", {})
-                error_message = str(crash.get("message", ""))
-                stack_trace = json.dumps(longrepr)
+        if failure is not None:
+            status = "fail"
+            error_message = failure.get("message")
+            stack_trace = failure.text
+        elif error is not None:
+            status = "error"
+            error_message = error.get("message")
+            stack_trace = error.text
+        elif skipped is not None:
+            status = "skipped"
+        else:
+            status = "pass"
 
         test_results.append(TestResult(
             test_case_id=test_case_id,
@@ -289,7 +296,8 @@ def _parse_pytest_report(
             failed_assertions=None,
         ))
 
-    exit_code: int = data.get("exitcode", 1)
+    # overall_status is driven by pytest's real process exit code (0 pass, 1 tests failed,
+    # any other value = the harness itself did not complete a normal run).
     error_phase: TestRunnerErrorPhase | None = None
     if exit_code == 0:
         overall_status: Literal["pass", "fail", "error"] = "pass"
@@ -299,20 +307,31 @@ def _parse_pytest_report(
         overall_status = "error"
         error_phase = "pytest_exit_error"
 
-    env = data.get("environment", {})
-    runtime_version = env.get("Python", env.get("python", ""))
-
     return TestRunnerResults(
         run_id=str(uuid.uuid4()),
         started_at=started_at,
         completed_at=_now(),
         overall_status=overall_status,
         test_results=test_results,
-        environment_info={"sandbox_image": sandbox_image, "runtime_version": runtime_version},
+        environment_info={"sandbox_image": sandbox_image, "runtime_version": _python_version(pytest_stdout)},
         stdout_tail=pytest_stdout[-4096:],
         stderr_tail="",
         error_phase=error_phase,
     )
+
+
+def _classname_to_path(classname: str) -> str:
+    """JUnit dotted module ('tests.sub.test_x') → test-relative path ('sub/test_x.py')."""
+    module_path = classname.replace(".", "/")
+    if not module_path.endswith(".py"):
+        module_path += ".py"
+    return module_path.removeprefix("tests/").lstrip("/")
+
+
+def _python_version(pytest_stdout: str) -> str:
+    """Best-effort Python version from pytest's session header (e.g. '-- Python 3.12.13')."""
+    match = re.search(r"Python (\d+\.\d+\.\d+)", pytest_stdout)
+    return match.group(1) if match else ""
 
 
 def _error_result(

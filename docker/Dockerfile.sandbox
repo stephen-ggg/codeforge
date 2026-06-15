@@ -1,7 +1,8 @@
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir \
-    pytest \
-    pytest-json-report
+# Results are emitted via pytest core's built-in --junit-xml reporter (no third-party
+# plugin), so the harness tooling can't be clobbered by a generated requirements file
+# pinning a different pytest. Pinned for reproducible images.
+RUN pip install --no-cache-dir 'pytest>=8.0,<10.0'
 
 WORKDIR /workspace

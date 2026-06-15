@@ -117,9 +117,9 @@ def _block_output(summary: str) -> AgentOutput:
         unresolved_flags=[
             Flag(
                 id="FLAG-001",
-                description="pytest-json-report plugin is not installed",
+                description="test collection requires a dependency missing from requirements-test.txt",
                 severity="block",
-                suggested_action="Add pytest-json-report to test deps",
+                suggested_action="Add the missing dependency to requirements-test.txt",
             )
         ],
     )
@@ -153,7 +153,7 @@ def test_block_flag_persists_links_and_enriches(sm: StateMachine, run_log_dir: P
     artifact_id = gate["artifact_ref"]
     assert artifact_id
     assert "FLAG-001" in gate["detail"]
-    assert "pytest-json-report plugin is not installed" in gate["detail"]
+    assert "test collection requires a dependency missing from requirements-test.txt" in gate["detail"]
     assert summary in gate["detail"]
 
     # The escalation record points back to the same artifact.
@@ -373,8 +373,8 @@ def _environment_analysis() -> TestAnalysis:
                 test_case_id="ALL (no tests collected)",
                 root_cause_hypothesis="environment",
                 confidence=0.99,
-                evidence="pytest stderr: unrecognized arguments --json-report",
-                recommended_action="Add pytest-json-report>=1.5 to requirements-test.txt",
+                evidence="pytest collection error: ModuleNotFoundError: No module named 'httpx'",
+                recommended_action="Add httpx>=0.27 to requirements-test.txt",
             )
         ],
         coverage_update=[],
@@ -390,7 +390,7 @@ def test_build_env_fix_context_is_firewall_safe_projection() -> None:
     finding = ctx["environment_findings"][0]
     # Only the whitelisted fields cross the firewall — no raw artifact, no code.
     assert set(finding.keys()) == {"recommended_action", "evidence"}
-    assert "pytest-json-report" in finding["recommended_action"]
+    assert "httpx" in finding["recommended_action"]
     # The raw analysis fields/keys must NOT leak through.
     assert "root_cause_hypothesis" not in finding
     assert "verdict" not in ctx
@@ -407,7 +407,7 @@ def _routing_events(sm: StateMachine) -> list[dict]:
 
 def test_test_infra_error_recovers_to_test_design_and_counts(sm: StateMachine) -> None:
     recovery = route_test_analysis_recoverable_error(
-        "no_results_json", sm.run.retry_counters, sm._config.to_dict()
+        "no_results_report", sm.run.retry_counters, sm._config.to_dict()
     )
     assert recovery is not None and recovery.next_state == "test_design"
 
@@ -417,7 +417,7 @@ def test_test_infra_error_recovers_to_test_design_and_counts(sm: StateMachine) -
 
     routing = _routing_events(sm)
     assert routing[-1]["routing_table_row"] == "test_error_test_infra_repair"
-    assert "error_phase=no_results_json" in routing[-1]["detail"]
+    assert "error_phase=no_results_report" in routing[-1]["detail"]
 
 
 def test_runtime_dep_error_recovers_to_coding_with_dep_context(sm: StateMachine) -> None:

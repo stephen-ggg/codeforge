@@ -40,7 +40,7 @@ def test_runtime_dep_phase_routes_to_coder() -> None:
 
 
 def test_test_infra_phase_routes_to_test_designer() -> None:
-    for phase in ("no_results_json", "pytest_exit_error"):
+    for phase in ("test_dep_install_failed", "no_results_report", "pytest_exit_error"):
         out = route_test_analysis_recoverable_error(phase, RetryCounters(), _CONFIG)
         assert out is not None, phase
         assert out.next_state == "test_design"

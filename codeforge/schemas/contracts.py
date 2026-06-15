@@ -740,8 +740,9 @@ class TestResult(BaseModel):
 TestRunnerErrorPhase = Literal[
     "missing_requirements_txt",     # code_artifact had no requirements.txt        → coder
     "runtime_dep_install_failed",   # pip install -r requirements.txt failed        → coder
-    "no_results_json",              # pytest produced no results.json (e.g. missing plugin) → test_designer
-    "results_parse_error",          # results.json was not valid JSON               → (transient)
+    "test_dep_install_failed",      # pip install -r requirements-test.txt failed   → test_designer
+    "no_results_report",            # pytest produced no JUnit XML report           → test_designer
+    "results_parse_error",          # results.xml was not valid XML                 → (transient)
     "pytest_exit_error",            # pytest exited with a non-0/1 code             → test_designer
 ]
 
