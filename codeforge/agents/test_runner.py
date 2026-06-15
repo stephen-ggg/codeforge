@@ -4,10 +4,12 @@ agents/test_runner.py — Mechanical codeforge test execution agent.
 Runs the test suite in a Docker sandbox. No LLM involved.
 
 Container layout (fixed, not configurable per run in MVP):
-  /workspace/requirements.txt       — runtime deps (from code_artifact)
-  /workspace/requirements-test.txt  — test-only deps (from test_infrastructure, optional)
-  /workspace/src/<path>             — source files (from code_artifact, excluding requirements.txt)
-  /workspace/tests/<path>           — test files (test_cases[].code + test_infrastructure files)
+  /workspace/<path>                 — every file staged verbatim at its project-root-relative
+                                      path. The agents already emit root-relative paths
+                                      (src/foo.py, tests/test_foo.py, requirements.txt,
+                                      conftest.py), so /workspace is a faithful project tree.
+                                      pytest is invoked from /workspace; src/ is therefore
+                                      importable and tests/ is discoverable.
 
 Results are emitted via pytest core's built-in --junit-xml reporter — no third-party
 plugin — so a generated requirements file pinning a different pytest cannot break the
@@ -170,37 +172,38 @@ class TestRunner:
 # ---------------------------------------------------------------------------
 
 def _copy_code_files(container: Any, code_artifact: CodeArtifact) -> None:
-    entries: list[tuple[str, str]] = []
-    for f in code_artifact.files:
-        if f.change_type == "deleted":
-            continue
-        if f.path == "requirements.txt":
-            entries.append(("workspace/requirements.txt", f.content))
-        else:
-            entries.append((f"workspace/src/{f.path}", f.content))
+    # Paths are project-root-relative (e.g. src/foo.py, requirements.txt) — stage verbatim.
+    entries = [
+        (_workspace_path(f.path), f.content)
+        for f in code_artifact.files
+        if f.change_type != "deleted"
+    ]
     if entries:
         container.put_archive("/", _make_tar(entries))
 
 
 def _copy_test_files(container: Any, test_suite: TestSuite) -> bool:
-    """Stage test files; returns True if requirements-test.txt was found."""
+    """Stage test files verbatim; returns True if requirements-test.txt was found."""
     entries: list[tuple[str, str]] = []
     has_req_test = False
 
     for test_case in test_suite.test_cases:
         for f in test_case.code:
-            entries.append((f"workspace/tests/{f.path}", f.content))
+            entries.append((_workspace_path(f.path), f.content))
 
     for f in test_suite.test_infrastructure:
         if f.path == "requirements-test.txt":
-            entries.append(("workspace/requirements-test.txt", f.content))
             has_req_test = True
-        else:
-            entries.append((f"workspace/tests/{f.path}", f.content))
+        entries.append((_workspace_path(f.path), f.content))
 
     if entries:
         container.put_archive("/", _make_tar(entries))
     return has_req_test
+
+
+def _workspace_path(path: str) -> str:
+    """Project-root-relative path → tar member path under /workspace (no leading slash)."""
+    return f"workspace/{path.lstrip('/')}"
 
 
 def _make_tar(entries: list[tuple[str, str]]) -> bytes:
@@ -325,11 +328,15 @@ def _parse_junit_report(
 
 
 def _classname_to_path(classname: str) -> str:
-    """JUnit dotted module ('tests.sub.test_x') → test-relative path ('sub/test_x.py')."""
+    """JUnit dotted module ('tests.sub.test_x') → root-relative path ('tests/sub/test_x.py').
+
+    pytest's rootdir is /workspace, so the classname is the module path relative to it —
+    which matches the project-root-relative paths the test files are staged and keyed under.
+    """
     module_path = classname.replace(".", "/")
     if not module_path.endswith(".py"):
         module_path += ".py"
-    return module_path.removeprefix("tests/").lstrip("/")
+    return module_path
 
 
 def _python_version(pytest_stdout: str) -> str:

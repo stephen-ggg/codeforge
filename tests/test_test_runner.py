@@ -8,8 +8,8 @@ exercised directly.
 """
 from __future__ import annotations
 
-from codeforge.agents.test_runner import _error_result, _parse_junit_report
-from codeforge.schemas.contracts import TestSuite
+from codeforge.agents.test_runner import _classname_to_path, _error_result, _parse_junit_report
+from codeforge.schemas.contracts import CodeFile, TestCase, TestSuite
 
 _JUNIT_TWO_TESTS = """<?xml version="1.0" encoding="utf-8"?>
 <testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="2" time="0.03">
@@ -48,6 +48,26 @@ def test_parse_report_pass_has_no_phase() -> None:
     res = _parse_junit_report(_JUNIT_TWO_TESTS, 0, "t0", "img", "", _empty_suite())
     assert res.overall_status == "pass"
     assert res.error_phase is None
+
+
+def test_classname_maps_to_root_relative_path() -> None:
+    # JUnit classname is rooted at /workspace, matching the project-root-relative paths
+    # files are staged under — so the tests/ prefix is preserved, not stripped.
+    assert _classname_to_path("tests.test_math_operations") == "tests/test_math_operations.py"
+    assert _classname_to_path("tests.sub.test_x") == "tests/sub/test_x.py"
+
+
+def test_parse_report_resolves_test_case_id_from_classname() -> None:
+    suite = TestSuite(
+        test_cases=[TestCase(
+            id="TC-001", title="t", criterion_ids=["AC-1"], type="unit", description="",
+            explicitly_not_testing=[],
+            code=[CodeFile(path="tests/test_sample.py", content="", language="python", change_type="new")],
+        )],
+        test_infrastructure=[], coverage_map=[],
+    )
+    res = _parse_junit_report(_JUNIT_TWO_TESTS, 0, "t0", "img", "", suite)
+    assert {r.test_case_id for r in res.test_results} == {"TC-001"}
 
 
 def test_parse_report_maps_testcase_outcomes() -> None:
