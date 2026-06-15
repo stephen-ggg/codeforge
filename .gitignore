@@ -14,10 +14,14 @@ __pycache__/
 # Markdown
 project-context*.md
 agent-contracts*.md
+build-stages*.md
 
 # Pipeline runtime files
 run-logs/
 .pipeline/LOCK
+
+# Claude Code
+.claude/worktrees/
 
 # Editor
 .vscode/
