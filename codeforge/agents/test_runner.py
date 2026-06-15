@@ -127,8 +127,12 @@ class TestRunner:
                     )
 
             # Run pytest, emitting a JUnit XML report via pytest core (no plugin).
+            # Invoked as `python -m pytest` (not the console script) so the working
+            # directory /workspace lands on sys.path — tests import the app via the
+            # `src.` package the manifest/test_designer prescribes, which only resolves
+            # when /workspace is importable.
             exit_code, out = container.exec_run(
-                "pytest tests/ --junit-xml=/workspace/results.xml -o junit_family=xunit2 -v",
+                "python -m pytest tests/ --junit-xml=/workspace/results.xml -o junit_family=xunit2 -v",
                 workdir="/workspace",
             )
             pytest_stdout = _decode(out)
