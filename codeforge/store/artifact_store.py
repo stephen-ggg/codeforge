@@ -3,12 +3,12 @@ store/artifact_store.py — Filesystem-backed artifact store.
 
 Each codeforge run gets its own directory under run-logs/<run_id>/:
   artifacts/         — validated agent outputs (AgentOutput + ArtifactMeta), one JSON per artifact
-  raw_outputs/       — raw LLM responses before validation, for debugging only
+  raw_outputs/       — raw LLM responses that failed validation and were dropped, for debugging
 
 Key behaviours:
   - write() stamps ArtifactMeta (UUID, ISO timestamp, SHA-256 content hash) and persists to disk
   - read() enforces allowed_consumers / forbidden_consumers before returning; raises AccessDeniedError
-  - write_raw() stores pre-validation output to raw_outputs/ — never mixed with validated artifacts
+  - write_raw() stores a dropped, validation-failed output to raw_outputs/ — never mixed with validated artifacts
   - get_latest() returns the most recently written artifact of a given type, or None
   - exists() checks whether any artifact of a given type has been written this run
 """
@@ -200,19 +200,25 @@ class ArtifactStore:
     # Write raw (pre-validation) output
     # ------------------------------------------------------------------
 
-    def write_raw(self, artifact_id: str, raw: str) -> None:
+    def write_raw(self, raw: str, produced_by: str | None = None) -> str:
         """
-        Store the raw LLM response string before validation.
+        Persist a raw, pre-validation LLM response string and return its id.
 
-        Goes to raw_outputs/<artifact_id>.json — never mixed with validated artifacts.
-        Called by the orchestrator immediately after receiving the LLM response,
-        before structural validation runs.
+        Goes to raw_outputs/<artifact_id>.json — isolated from validated artifacts and
+        invisible to get_latest/get_latest_meta/exists. Used to capture an output that
+        failed structural or contract validation and was about to be dropped, so the
+        escalation record can link to it for debugging.
         """
+        artifact_id = str(uuid.uuid4())
         raw_path = self._raw_outputs_dir / f"{artifact_id}.json"
         raw_path.write_text(
-            json.dumps({"artifact_id": artifact_id, "raw": raw}, ensure_ascii=False),
+            json.dumps(
+                {"artifact_id": artifact_id, "produced_by": produced_by, "raw": raw},
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
+        return artifact_id
 
     # ------------------------------------------------------------------
     # Read validated artifact

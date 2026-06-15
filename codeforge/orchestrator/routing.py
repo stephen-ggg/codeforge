@@ -113,6 +113,21 @@ def route_ceiling_exceeded() -> RoutingOutcome:
     )
 
 
+def route_output_truncated() -> RoutingOutcome:
+    """Response hit max_tokens (finish_reason == 'length') — truncated, unparseable.
+
+    Terminal: a re-prompt regenerates the same oversized output and truncates again at
+    the same ceiling, so escalate immediately rather than spending malformed_output
+    re-prompts. Resolution is config (raise max_tokens) or a smaller unit of work.
+    """
+    return RoutingOutcome(
+        row_id="output_truncated",
+        decision="escalate",
+        next_state="failed_escalated",
+        escalation_reason="output_truncated",
+    )
+
+
 def route_low_confidence(agent_id: str) -> RoutingOutcome:
     """Policy stage: confidence below threshold."""
     return RoutingOutcome(

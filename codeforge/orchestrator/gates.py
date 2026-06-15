@@ -130,7 +130,7 @@ class GateEvaluator:
             source_agent=agent_id,
             counters=counters_snap,
             detail="structural validation against Pydantic model" if structural_ok
-                   else f"validation errors: {len(malformed.validation_errors) if malformed else 0}",
+                   else self._format_malformed_detail(malformed),
         )
 
         if not structural_ok:
@@ -305,6 +305,24 @@ class GateEvaluator:
                 )
 
         return True, None
+
+    @staticmethod
+    def _format_malformed_detail(malformed: MalformedOutputRePrompt | None) -> str:
+        """
+        Build a self-sufficient schema_valid failure detail: the count PLUS each failing
+        field's path, error type, and the validator's expectation message. This is what
+        makes events.jsonl alone enough to see WHICH field is malformed (the offending
+        value itself is never included — ValidationError.received is always None).
+        """
+        if malformed is None or not malformed.validation_errors:
+            return "validation errors: 0"
+        segments = []
+        for err in malformed.validation_errors:
+            seg = f"{err.field_path} ({err.error_type})"
+            if err.expected:
+                seg += f": {err.expected}"
+            segments.append(seg)
+        return f"validation errors: {len(malformed.validation_errors)} | " + "; ".join(segments)
 
     def _make_counters_snap(
         self,

@@ -28,6 +28,7 @@ from codeforge.schemas.contracts import (
     FailureAnalysis,
     Flag,
     LowConfidenceRePrompt,
+    MalformedOutputRePrompt,
     TestAnalysis,
     TestRunnerResults,
 )
@@ -158,14 +159,136 @@ def test_block_flag_persists_links_and_enriches(sm: StateMachine, run_log_dir: P
     # The escalation record points back to the same artifact.
     assert sm.run.escalations[-1].agent_output_ref == artifact_id
 
-    # The artifact is persisted under failed_artifacts/ (recoverable for debugging).
-    assert (run_log_dir / "failed_artifacts" / f"{artifact_id}.json").exists()
+    # The artifact is persisted under the per-run failed_artifacts/ (recoverable for debugging).
+    assert (run_log_dir / sm.run.run_id / "failed_artifacts" / f"{artifact_id}.json").exists()
 
     # Side-effect guard: the blocked output must NOT leak into consumer queries
     # (assembler / resume) and must NOT occupy the normal artifacts slot.
     assert sm._artifact_store.exists("test_analysis") is False
     assert sm._artifact_store.get_latest("test_analysis") is None
     assert "test_analysis" not in sm.run.artifacts
+
+
+# ----------------------------------------------------------------------
+# Structural / malformed escalation: the dropped raw output is recoverable
+# ----------------------------------------------------------------------
+
+
+def _malformed_gate_result() -> GateResult:
+    gr = GateResult()
+    gr.structural_passed = False
+    gr.malformed_reprompt = MalformedOutputRePrompt(
+        original_input_ref="assembly-1",
+        validation_errors=[],
+        attempt_number=1,
+        max_attempts=2,
+    )
+    return gr
+
+
+def test_malformed_exhausted_persists_raw_and_links(
+    sm: StateMachine, run_log_dir: Path
+) -> None:
+    """On a budget-exhausted malformed failure the raw (unparseable) response is written
+    to the isolated raw_outputs/ area and linked from the escalation, so the dropped
+    output is debuggable instead of vanishing."""
+    sm.run.retry_counters.malformed_output = 99  # force budget exhaustion
+    gr = _malformed_gate_result()
+    raw = '{"output": {"verdict": "pass"  <- truncated, not valid JSON'
+
+    with pytest.raises(EscalationError) as exc:
+        sm._handle_structural_failure(raw, "test_designer", gr)
+    assert exc.value.reason == "malformed_output"
+
+    # The escalation record points at a raw-output artifact id.
+    artifact_id = sm.run.escalations[-1].agent_output_ref
+    assert artifact_id
+
+    # The dropped raw response is recoverable under the per-run raw_outputs/ (never artifacts/).
+    raw_path = run_log_dir / sm.run.run_id / "raw_outputs" / f"{artifact_id}.json"
+    assert raw_path.exists()
+    record = json.loads(raw_path.read_text())
+    assert record["raw"] == raw
+    assert record["produced_by"] == "test_designer"
+
+
+def test_truncated_output_escalates_and_persists_raw(
+    sm: StateMachine, run_log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A response that hit max_tokens (finish_reason=length) is terminal: persist the
+    partial output, emit a truncation-specific gate, and escalate as output_truncated —
+    not as a generic malformed_output that would burn re-prompts re-truncating."""
+    from codeforge.model_router.router import RouterResult
+
+    partial = '{"output": {"files": [{"path": "a.py", "content": "<cut off at max_tokens'
+    monkeypatch.setattr(
+        sm.router,
+        "complete",
+        lambda **kwargs: RouterResult(
+            content=partial, litellm_call_id="call-1", model_used="m", truncated=True
+        ),
+    )
+
+    with pytest.raises(EscalationError) as exc:
+        sm._invoke_agent("coder", "system", "turn")
+    assert exc.value.reason == "output_truncated"
+
+    # The partial response is recoverable and linked from the escalation.
+    artifact_id = sm.run.escalations[-1].agent_output_ref
+    assert artifact_id
+    raw_path = run_log_dir / sm.run.run_id / "raw_outputs" / f"{artifact_id}.json"
+    assert raw_path.exists()
+    assert json.loads(raw_path.read_text())["raw"] == partial
+
+    # The failing gate names truncation specifically and links the same artifact.
+    gate = _gate_events(run_log_dir, sm.run.run_id)[-1]
+    assert gate["passed"] is False
+    assert "truncated" in gate["detail"]
+    assert gate["artifact_ref"] == artifact_id
+
+
+def test_malformed_detail_names_the_failing_field() -> None:
+    """The schema_valid failure detail must name each failing field (path + error type +
+    expectation) so events.jsonl alone diagnoses WHICH field is malformed."""
+    from codeforge.orchestrator.gates import GateEvaluator
+    from codeforge.schemas.contracts import ValidationError as VErr
+
+    malformed = MalformedOutputRePrompt(
+        original_input_ref="assembly-1",
+        validation_errors=[
+            VErr(
+                field_path="output.confidence",
+                error_type="missing_required",
+                expected="Field required",
+                received=None,
+            )
+        ],
+        attempt_number=1,
+        max_attempts=2,
+    )
+    detail = GateEvaluator._format_malformed_detail(malformed)
+    assert "validation errors: 1" in detail
+    assert "output.confidence" in detail
+    assert "missing_required" in detail
+    assert "Field required" in detail
+
+
+def test_malformed_within_budget_reprompts_without_persisting(
+    sm: StateMachine, run_log_dir: Path
+) -> None:
+    """While in budget a malformed failure re-prompts (no escalation, nothing persisted —
+    the output is not terminal) and increments the malformed counter."""
+    sm.run.retry_counters.malformed_output = 0
+    gr = _malformed_gate_result()
+
+    reprompt = sm._handle_structural_failure('{"bad": ', "coder", gr)
+
+    assert reprompt is gr.malformed_reprompt
+    assert sm.run.retry_counters.malformed_output == 1
+    assert sm.run.escalations == []
+
+    raw_dir = run_log_dir / sm.run.run_id / "raw_outputs"
+    assert not any(raw_dir.glob("*.json"))
 
 
 def test_format_policy_detail_without_summary(sm: StateMachine) -> None:

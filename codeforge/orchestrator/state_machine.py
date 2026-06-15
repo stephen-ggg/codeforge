@@ -34,6 +34,7 @@ from codeforge.orchestrator.routing import (
     route_malformed,
     route_block_flag,
     route_ceiling_exceeded,
+    route_output_truncated,
     route_low_confidence,
     route_low_confidence_reprompt,
     route_requirements_clarify,
@@ -123,7 +124,9 @@ class StateMachine:
         self._project_dir = project_dir
         self._run_log_dir = run_log_dir
 
-        # Stores
+        # Stores. The artifact store is re-rooted at the per-run directory
+        # (run-logs/<run_id>/) in start_run/resume_run once the run_id is known — this
+        # base-rooted instance is a placeholder that is never written to.
         self._project_state = ProjectStateStore(project_dir)
         self._artifact_store = ArtifactStore(run_log_dir)
 
@@ -156,6 +159,8 @@ class StateMachine:
         run_id = _new_run_id()
         run_log_dir = self._run_log_dir / run_id
         run_log_dir.mkdir(parents=True, exist_ok=True)
+        # Root all artifact I/O (validated / failed / raw) under this run's directory.
+        self._artifact_store = ArtifactStore(run_log_dir)
 
         from typing import Literal as Lit
         run_mode_typed = cast(Lit["new_project", "continuation"], run_mode)
@@ -192,6 +197,7 @@ class StateMachine:
         """Restore state from a persisted CodeforgeRun (codeforge resume command)."""
         self._run = run
         run_log_dir = self._run_log_dir / run.run_id
+        self._artifact_store = ArtifactStore(run_log_dir)
         self._pending = PendingWrites(self._project_state)
         self._event_log = EventLog(run_log_dir, run.run_id, self._config.name)
         self._validator = OutputValidator(self._config.to_dict())
@@ -331,6 +337,26 @@ class StateMachine:
             reprompt_reason=reprompt_reason,
             litellm_call_id=result.litellm_call_id,
         )
+
+        # Truncated output (finish_reason == "length") is terminal: it can't be parsed,
+        # and a re-prompt would re-truncate at the same max_tokens. Persist the partial
+        # response for debugging, emit a self-sufficient gate event, and escalate with a
+        # clear reason rather than letting it masquerade as a generic malformed_output.
+        if result.truncated:
+            artifact_id = self._artifact_store.write_raw(result.content, produced_by=agent_id)
+            self.event_log.emit_gate(
+                rule="schema_valid",
+                passed=False,
+                source_agent=typed_actor,
+                counters=self._counters_snap(),
+                detail=(
+                    "output truncated at max_tokens (finish_reason=length) — raise the "
+                    f"agent's max_tokens or reduce the unit of work for '{agent_id}'"
+                ),
+                artifact_ref=artifact_id,
+            )
+            self._apply_outcome(route_output_truncated())
+            self._escalate("output_truncated", context=artifact_id)
 
         return result.content
 
@@ -472,6 +498,32 @@ class StateMachine:
         )
         return meta.artifact_id
 
+    def _handle_structural_failure(
+        self,
+        raw: str,
+        agent_id: str,
+        gate_result: GateResult,
+    ) -> RePromptContext | None:
+        """
+        Handle a structural (malformed) or contract gate failure: route_malformed
+        decides re-prompt vs escalate.
+
+        On the terminal (budget-exhausted) path the raw LLM response — which failed
+        validation and would otherwise be dropped — is persisted to the ISOLATED
+        raw_outputs/ area and linked from the escalation's agent_output_ref so the
+        offending output is debuggable. Returns the re-prompt context on the re-prompt
+        path; raises EscalationError on the terminal path.
+        """
+        reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
+        outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), agent_id)
+        self._apply_outcome(outcome)
+        if outcome.decision == "escalate":
+            artifact_id = self._artifact_store.write_raw(raw, produced_by=agent_id)
+            self._escalate(
+                outcome.escalation_reason or "malformed_output", context=artifact_id
+            )
+        return reprompt
+
     def _format_policy_detail(self, gate_result: GateResult, output: Any) -> str:
         """
         Build a self-sufficient gate detail string so the events.jsonl line alone is
@@ -576,13 +628,9 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed:
-                reprompt = gate_result.malformed_reprompt
-                outcome = route_malformed(
-                    self.run.retry_counters, self._config.to_dict(), "requirements_analyst"
+                reprompt = self._handle_structural_failure(
+                    raw, "requirements_analyst", gate_result
                 )
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
             if not gate_result.policy_passed:
@@ -685,13 +733,9 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed:
-                reprompt = gate_result.malformed_reprompt
-                outcome = route_malformed(
-                    self.run.retry_counters, self._config.to_dict(), "architecture_designer"
+                reprompt = self._handle_structural_failure(
+                    raw, "architecture_designer", gate_result
                 )
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
             if not gate_result.contract_passed:
@@ -827,11 +871,7 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed:
-                reprompt = gate_result.malformed_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "coder")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "coder", gate_result)
                 continue
 
             if not gate_result.contract_passed:
@@ -907,11 +947,7 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed or not gate_result.contract_passed:
-                reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "code_reviewer")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "code_reviewer", gate_result)
                 continue
 
             if not gate_result.policy_passed:
@@ -989,11 +1025,7 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed or not gate_result.contract_passed:
-                reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "security_reviewer")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "security_reviewer", gate_result)
                 continue
 
             if not gate_result.policy_passed:
@@ -1086,11 +1118,7 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed:
-                reprompt = gate_result.malformed_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "test_designer")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "test_designer", gate_result)
                 continue
 
             if not gate_result.contract_passed:
@@ -1166,11 +1194,7 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed or not gate_result.contract_passed:
-                reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "test_analyst")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "test_analyst", gate_result)
                 continue
 
             if not gate_result.policy_passed:

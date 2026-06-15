@@ -107,6 +107,7 @@ EscalationReason = Literal[
     "max_retries_exceeded",
     "global_ceiling_exceeded",
     "malformed_output",
+    "output_truncated",
     "block_flag",
     "low_confidence",
     "human_required",

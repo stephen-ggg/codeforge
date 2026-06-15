@@ -68,8 +68,9 @@ class OutputValidator:
         Parse `raw` as JSON and validate against `expected_model`.
 
         Returns (True, None) on success.
-        Returns (False, MalformedOutputRePrompt) on failure — the raw output is
-        NOT included in the reprompt (caller stores it to raw_outputs/ separately).
+        Returns (False, MalformedOutputRePrompt) on failure — the raw output is NOT
+        included in the reprompt; on terminal (budget-exhausted) failures the caller
+        persists it to raw_outputs/ and links it from the escalation for debugging.
         """
         validation_errors: list[ValidationError] = []
 

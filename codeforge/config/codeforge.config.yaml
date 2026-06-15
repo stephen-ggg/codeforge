@@ -66,7 +66,11 @@ agents:
   coder:
     model: "claude-opus-4-8"
     temperature: 0.2
-    max_tokens: 8192
+    # 16000 is the safe non-streaming ceiling (the router calls litellm without
+    # stream=True; larger values risk SDK HTTP timeouts). The coder emits whole files
+    # inline, so 8192 truncated mid-JSON on multi-file features. To go higher (opus-4-8
+    # supports 128K) the router must switch to streaming.
+    max_tokens: 16000
     system_prompt: "prompts/rendered/coder.md"
     metadata:
       agent_id: "coder"
