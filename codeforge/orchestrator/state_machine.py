@@ -65,9 +65,13 @@ from codeforge.orchestrator.routing import (
 from codeforge.orchestrator.state_writer import flush_pending_writes
 from codeforge.schemas.contracts import (
     AgentId,
+    AgentOutput,
+    ArchitectureDesignerOutput,
     ArtifactRef,
     ArtifactType,
     CodeArtifact,
+    CodeReviewerOutput,
+    CoderOutput,
     CodeforgeRun,
     CodeforgeStatus,
     CountersSnapshot,
@@ -81,8 +85,11 @@ from codeforge.schemas.contracts import (
     RetryCounters,
     ReviewReport,
     SecurityReport,
+    SecurityReviewerOutput,
     TestAnalysis,
+    TestAnalystOutput,
     ArchitectureDoc,
+    TestDesignerOutput,
     TestSuite,
 )
 from codeforge.schemas.validation import OutputValidator
@@ -590,7 +597,6 @@ class StateMachine:
         """
         self._current_phase = "requirements_clarification"
         from codeforge.agents.requirements_analyst import RequirementsAnalystAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         clarification_history: list[dict[str, Any]] = []
         confirm_rejection: dict[str, str] | None = None
@@ -698,7 +704,7 @@ class StateMachine:
         """Drive architecture design to completion."""
         self._current_phase = "architecture"
         from codeforge.agents.architecture_designer import ArchitectureDesignerAgent
-        from codeforge.schemas.contracts import AgentOutput, InterfaceManifest
+        from codeforge.schemas.contracts import InterfaceManifest
 
         reprompt: RePromptContext | None = None
 
@@ -723,7 +729,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=ArchitectureDesignerOutput,
                 agent_id="architecture_designer",
                 attempt_number=self.run.retry_counters.architecture_validation,
                 assembly_id=pkg.assembly_id,
@@ -753,9 +759,8 @@ class StateMachine:
                 )
                 continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            arch_doc = ArchitectureDoc(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            arch_doc = cast(ArchitectureDoc, output.output)
 
             # Check for locked tech decisions
             locked = [d for d in arch_doc.tech_decisions if d.locked]
@@ -830,7 +835,6 @@ class StateMachine:
         """Drive coding to completion."""
         self._current_phase = "coding"
         from codeforge.agents.coder import CoderAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
         first_call = True
@@ -861,7 +865,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=CoderOutput,
                 agent_id="coder",
                 attempt_number=self.run.retry_counters.coder_validation,
                 assembly_id=pkg.assembly_id,
@@ -893,9 +897,8 @@ class StateMachine:
                 )
                 continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            code_artifact = CodeArtifact(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            code_artifact = cast(CodeArtifact, output.output)
 
             outcome = route_coding_valid()
             self._apply_outcome(outcome)
@@ -919,7 +922,6 @@ class StateMachine:
         """Drive code review to completion. Returns passing ReviewReport."""
         self._current_phase = "code_review"
         from codeforge.agents.code_reviewer import CodeReviewerAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
 
@@ -938,7 +940,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=CodeReviewerOutput,
                 agent_id="code_reviewer",
                 attempt_number=self.run.retry_counters.malformed_output,
                 assembly_id=pkg.assembly_id,
@@ -957,9 +959,8 @@ class StateMachine:
                 )
                 continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            report = ReviewReport(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            report = cast(ReviewReport, output.output)
 
             if report.verdict == "fail":
                 outcome = route_code_review_fail(self.run.retry_counters, self._config.to_dict())
@@ -997,7 +998,6 @@ class StateMachine:
         """Drive security review to completion. Returns passing SecurityReport."""
         self._current_phase = "code_review"
         from codeforge.agents.security_reviewer import SecurityReviewerAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
 
@@ -1016,7 +1016,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=SecurityReviewerOutput,
                 agent_id="security_reviewer",
                 attempt_number=self.run.retry_counters.malformed_output,
                 assembly_id=pkg.assembly_id,
@@ -1035,9 +1035,8 @@ class StateMachine:
                 )
                 continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            report = SecurityReport(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            report = cast(SecurityReport, output.output)
 
             if report.verdict == "fail":
                 outcome = route_security_review_fail(self.run.retry_counters, self._config.to_dict())
@@ -1077,7 +1076,6 @@ class StateMachine:
         """Drive test design to completion."""
         self._current_phase = "test_design"
         from codeforge.agents.test_designer import TestDesignerAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
 
@@ -1108,7 +1106,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=TestDesignerOutput,
                 agent_id="test_designer",
                 attempt_number=self.run.retry_counters.test_loop,
                 assembly_id=pkg.assembly_id,
@@ -1136,9 +1134,8 @@ class StateMachine:
                 )
                 continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            test_suite = TestSuite(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            test_suite = cast(TestSuite, output.output)
 
             ref = self._store_artifact("test_suite", "test_designer", output)
             self.run.artifacts["test_suite"] = ref
@@ -1163,7 +1160,6 @@ class StateMachine:
         """Drive test analysis to completion."""
         self._current_phase = "test_execution"
         from codeforge.agents.test_analyst import TestAnalystAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
 
@@ -1185,7 +1181,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=TestAnalystOutput,
                 agent_id="test_analyst",
                 attempt_number=self.run.retry_counters.malformed_output,
                 assembly_id=pkg.assembly_id,
@@ -1204,9 +1200,8 @@ class StateMachine:
                 )
                 continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            analysis = TestAnalysis(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            analysis = cast(TestAnalysis, output.output)
 
             ref = self._store_artifact("test_analysis", "test_analyst", output)
             self.run.artifacts["test_analysis"] = ref

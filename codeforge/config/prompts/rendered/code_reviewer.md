@@ -166,7 +166,7 @@ Your response payload must be a single JSON object matching the schema below. Pr
 | `output.findings` | `ReviewFinding[]` | required |
 | `output.findings[].id` | `string` | required |
 | `output.findings[].file` | `string` | required |
-| `output.findings[].line_range` | `object[] | null` | optional |
+| `output.findings[].line_range` | `[integer, integer] | null` | optional |
 | `output.findings[].category` | `'correctness' | 'clarity' | 'spec_adherence' | 'interface_compliance'` | required |
 | `output.findings[].severity` | `'info' | 'warn' | 'error'` | required |
 | `output.findings[].description` | `string` | required |

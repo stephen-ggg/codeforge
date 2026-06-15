@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from codeforge.schemas.contracts import (
     AgentId,
     AgentOutput,
@@ -99,7 +101,7 @@ class GateEvaluator:
     def evaluate(
         self,
         raw: str,
-        expected_model: type,
+        expected_model: type[BaseModel],
         agent_id: AgentId,
         attempt_number: int,
         assembly_id: str,
@@ -138,14 +140,20 @@ class GateEvaluator:
             result.malformed_reprompt = malformed
             return result
 
-        # Parse the validated output
+        # Parse the validated output. Use the (parametrized) expected_model so the
+        # nested payload is a typed instance — D9 severity-force and downstream
+        # consumers rely on isinstance(output.output, ...) holding.
         import json
         from typing import cast
         data = json.loads(raw)
-        output: AgentOutput[Any] = AgentOutput(**data)
+        output: AgentOutput[Any] = cast("AgentOutput[Any]", expected_model.model_validate(data))
 
         # --- D9: force verdict to fail if error/critical severity present ---
         self._apply_severity_force(output, agent_id)
+
+        # Expose the typed, D9-mutated output so the state machine consumes it
+        # directly instead of re-parsing the raw string (which would lose D9).
+        result.parsed_output = output
 
         # --- Contract validation ---
         contract_ok, violation = self._validator.validate_contract(
@@ -198,7 +206,6 @@ class GateEvaluator:
             block_rule: GateRule = "block_flag_present"
             conf_rule: GateRule = "confidence_threshold"
             result.policy_gate_rule = block_rule if escalation_reason == "block_flag" else conf_rule
-            result.parsed_output = output
             result.policy_passed = False
             result.escalation_reason = escalation_reason
             return result
