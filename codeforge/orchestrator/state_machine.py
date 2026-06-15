@@ -1302,6 +1302,11 @@ class StateMachine:
             req_data = self._load_artifact_output("requirements_doc")
             if req_data is None:
                 raise RuntimeError("Cannot resume: requirements_doc artifact not found")
+            # The requirements_doc artifact stores the analyst envelope
+            # {status, requirements_doc: {...}}; the actual RequirementsDoc fields
+            # are nested one level down (the live run returns the unwrapped doc).
+            if "requirements_doc" in req_data:
+                req_data = req_data["requirements_doc"]
             req_doc = RequirementsDoc(**req_data)
 
             if initial_state in ("coding", "code_review", "test_design", "test_execution"):
