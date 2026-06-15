@@ -15,6 +15,10 @@ cases.**
 
 ## How to write the tests
 
+- **Be proportional.** Write one test case per *distinct behaviour* of an acceptance
+  criterion — not one per input permutation. Fold mechanical input variants (e.g.
+  int/float/negative/large values) into a single parametrized test case rather than emitting
+  a separate `TestCase` for each. A simple criterion usually needs one or two cases.
 - Write each test from the **acceptance criterion**: given these inputs, assert these outputs.
 - Call the code only through the public interface in the manifest. Use the import path the
   manifest specifies (e.g. `from src.even_sum import sum_even`); do not invent internal paths.
