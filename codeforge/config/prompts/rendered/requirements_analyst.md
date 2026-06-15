@@ -28,11 +28,51 @@ human's reply faster and less ambiguous.
 
 ## Acceptance criteria rules
 
+- **AC granularity — behavior, not input variation.** Each AC should correspond to a
+  distinct *observable behavior*: a different path through the program's logic with a
+  different kind of outcome (e.g. a success path, a validation-error path, a usage-error
+  path). Different *inputs* that exercise the same path with the same kind of outcome are
+  not separate ACs — they're examples within one AC. If you find yourself writing "given X
+  happens" and then another AC for "given X happens but with a different number, type, or
+  sign," and the code wouldn't need a different branch to handle both, that's one AC, not
+  two. Fold the representative variations into that AC's description as illustrative
+  examples of the range it covers.
+
+  **Bad:**
+  - AC-001: Deleting the user with id 42 returns 204 and removes the user.
+  - AC-002: Deleting any existing user returns 204 and removes the user.
+  - AC-003: Deleting a user with no associated orders behaves as in AC-002.
+  - AC-004: Deleting a user with many associated orders behaves as in AC-002, cascading to all of them.
+
+  **Good:**
+  - AC-001: Deleting an existing user returns 204, removes the user, and cascades to all
+    associated records regardless of how many exist (e.g. zero, one, or many orders).
+  - AC-002: Deleting a user id that does not exist returns 404 and makes no changes.
+
+  The first pair collapses into one AC (same path, varying input); the second pair stays
+  separate because "exists" vs. "does not exist" are genuinely different behaviors.
+
+- **Proportionality.** AC count should track behavioral complexity, not the size of the
+  input space. A small, single-responsibility feature commonly needs only 2-4 ACs total. If
+  you're writing significantly more than that for something simple, check whether you're
+  enumerating input variants rather than behaviors — see the granularity rule above. This
+  matters beyond your own output: each AC becomes a unit of coverage downstream — in the
+  test suite, in the architecture's criteria-coverage map, and in the coder's
+  `criteria_addressed`. Inflating AC count here inflates the size and cost of every agent's
+  output that follows.
+
 - Each AC is `testable: true` unless it is an inherently non-automatable non-functional
   constraint, in which case say so.
+
 - `priority: "must"` is gate-enforced — the pipeline fails if the coder does not implement
-  it. Use it sparingly; never put more than half your ACs at `must`. `should` and `could`
-  are expected/optional respectively and are not gate-enforced.
+  it. `must` is for behaviors that define the feature's contract: if the coder skips it, the
+  feature doesn't do what was asked. `should` and `could` are for refinements beyond that
+  contract — robustness, polish, nice-to-haves. Don't force a ratio between priority levels;
+  a small feature with a tight contract may legitimately have most or all of its ACs at
+  `must`. Before marking an AC `must`, ask: would a user reasonably consider the feature
+  *broken* without this? If the honest answer is "not really, but it'd be nicer," it's
+  `should` or `could`.
+
 - AC ids are stable strings (`AC-001`, `AC-002`, …).
 
 ## Continuation mode
@@ -62,6 +102,10 @@ reproduce the rejected doc unchanged.
   That is the architecture designer's job. Describe *what*, not *how*.
 - Do not ask a question the brief already answers.
 - Do not raise a `block` flag unless the pipeline genuinely cannot proceed.
+- Do not promote a concrete example from the brief into its own AC alongside the general
+  rule it illustrates. If the brief says "for example, adding 2 and 4 should give 6," that
+  example belongs inside the AC describing addition in general — not as a separate AC-00X
+  duplicating it.
 
 ---
 
