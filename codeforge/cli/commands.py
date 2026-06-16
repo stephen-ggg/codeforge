@@ -152,7 +152,9 @@ def _do_commit(
         outcome = route_commit_state_fail(run.retry_counters, config.to_dict())
         sm._apply_outcome(outcome)  # increments counter + emits routing event
         if outcome.decision == "escalate":
-            raise EscalationError(
+            # Record the escalation (status=failed_escalated, suggested_reentry_state
+            # =commit) so the run stays resumable, then raise EscalationError.
+            sm._escalate(
                 "commit_failure",
                 f"State commit failed after retries: {state_result.error_message}",
             )
@@ -185,7 +187,7 @@ def _do_commit(
         outcome = route_commit_src_fail(run.retry_counters, config.to_dict())
         sm._apply_outcome(outcome)
         if outcome.decision == "escalate":
-            raise EscalationError(
+            sm._escalate(
                 "commit_failure",
                 f"Source commit failed after retries: {src_result.error_message}",
             )
@@ -194,6 +196,11 @@ def _do_commit(
         )
 
     sm._apply_outcome(route_commit_success())
+
+    # The git commit has now landed — promote the run to succeeded. run_commit()
+    # deliberately leaves status untouched so a commit failure stays resumable.
+    run.status = "succeeded"
+    sm.event_log.update_run_snapshot(run)
 
 
 # ---------------------------------------------------------------------------

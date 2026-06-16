@@ -1215,6 +1215,7 @@ class StateMachine:
 
     def run_commit(self) -> None:
         """Flush pending_writes to disk. CommitWriter invocation handled by CLI layer."""
+        self._current_phase = "commit"
         counters = self._counters_snap()
         flush_pending_writes(
             self.pending,
@@ -1223,7 +1224,10 @@ class StateMachine:
             counters,
             run_id=self.run.run_id,
         )
-        self.run.status = "succeeded"
+        # Status is promoted to "succeeded" by the CLI only after the git commit
+        # (_do_commit) actually lands. Marking success here would be premature: a
+        # commit failure must leave the run as failed_escalated and resumable, not
+        # falsely "succeeded".
         self.event_log.update_run_snapshot(self.run)
 
     # ------------------------------------------------------------------
@@ -1310,12 +1314,15 @@ class StateMachine:
                 req_data = req_data["requirements_doc"]
             req_doc = RequirementsDoc(**req_data)
 
-            if initial_state in ("coding", "code_review", "test_design", "test_execution"):
+            if initial_state in ("coding", "code_review", "test_design", "test_execution", "commit"):
                 arch_data = self._load_artifact_output("architecture_doc")
                 if arch_data is not None:
                     arch_doc = ArchitectureDoc(**arch_data)
 
-            if initial_state in ("test_execution",):
+            # "commit" re-entry skips the phase loop (mapped to "done" below) but still
+            # needs code_art + test_suite for run_commit's closing asserts and the CLI's
+            # source-code commit.
+            if initial_state in ("test_execution", "commit"):
                 code_data = self._load_artifact_output("code_artifact")
                 if code_data is not None:
                     code_art = CodeArtifact(**code_data)

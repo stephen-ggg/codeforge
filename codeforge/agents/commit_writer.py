@@ -65,8 +65,12 @@ class CommitWriter:
             # Stage only the project-state/ subtree
             repo.git.add("project-state/")
 
-            # Nothing to commit is not an error — maybe this run produced no state changes
-            if not repo.index.diff("HEAD") and not repo.untracked_files:
+            # Nothing to commit is not an error — maybe this run produced no state changes.
+            # On a brand-new repo with no initial commit, HEAD is unborn and cannot be
+            # diffed against (GitPython raises BadName), so only run the diff-against-HEAD
+            # short-circuit when HEAD already resolves to a commit. With an unborn HEAD we
+            # fall through and let index.commit create the initial commit.
+            if repo.head.is_valid() and not repo.index.diff("HEAD") and not repo.untracked_files:
                 commit_sha = repo.head.commit.hexsha
                 return CommitWriterResult(
                     target="codeforge_state",
@@ -119,11 +123,22 @@ class CommitWriter:
             source_repo_path = Path(src_cfg.path)
             repo = git.Repo(source_repo_path)
 
-            # Start from a clean default branch
-            repo.git.checkout(src_cfg.default_branch)
-
             branch_name = f"{src_cfg.branch_prefix}{input.run_id}"
-            repo.git.checkout("-b", branch_name)
+
+            # Start from a clean default branch when the repo already has history.
+            # On a brand-new repo with no commits, HEAD is unborn: there is no
+            # default-branch commit to base off (`git checkout <default>` errors with
+            # "pathspec did not match"), so we branch directly off the unborn HEAD and
+            # the commit below becomes the repo's initial commit.
+            if repo.head.is_valid():
+                repo.git.checkout(src_cfg.default_branch)
+
+            # Create the feature branch, or reuse it on a resume/retry where a prior
+            # attempt already created it (`checkout -b` errors if it exists).
+            if branch_name in (h.name for h in repo.heads):
+                repo.git.checkout(branch_name)
+            else:
+                repo.git.checkout("-b", branch_name)
 
             # Write source files
             output_dir = src_cfg.output_dir or "src"
@@ -136,20 +151,22 @@ class CommitWriter:
             commit = repo.index.commit(message)
             commit_sha = commit.hexsha
 
-            # Push
-            remote = _get_or_add_remote(repo, src_cfg.remote, "origin")
-            repo.git.push(remote, f"{branch_name}:{branch_name}", "--set-upstream")
-
-            # Open PR
-            pr_url = _open_pull_request(
-                github_token=self._config.github_token,
-                remote_url=src_cfg.remote,
-                branch_name=branch_name,
-                pr_target=src_cfg.pr_target,
-                auto_merge=src_cfg.auto_merge,
-                input=input,
-                commit_sha=commit_sha,
-            )
+            # Push + open PR only when a remote is configured. A local-only project
+            # (empty remote) commits to the local branch and stops there — mirrors the
+            # remote guard in commit_codeforge_state.
+            pr_url: str | None = None
+            if src_cfg.remote:
+                remote = _get_or_add_remote(repo, src_cfg.remote, "origin")
+                repo.git.push(remote, f"{branch_name}:{branch_name}", "--set-upstream")
+                pr_url = _open_pull_request(
+                    github_token=self._config.github_token,
+                    remote_url=src_cfg.remote,
+                    branch_name=branch_name,
+                    pr_target=src_cfg.pr_target,
+                    auto_merge=src_cfg.auto_merge,
+                    input=input,
+                    commit_sha=commit_sha,
+                )
 
             return CommitWriterResult(
                 target="source_code",
