@@ -19,7 +19,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.firewall.assembler import ContextAssembler
@@ -80,6 +80,7 @@ from codeforge.schemas.contracts import (
     HandoffInvocationType,
     LogActor,
     LowConfidenceRePrompt,
+    ReentryState,
     RePromptContext,
     RequirementsDoc,
     RetryCounters,
@@ -279,7 +280,7 @@ class StateMachine:
         )
         self.event_log.update_run_snapshot(self.run)
 
-    def _escalate(self, reason: EscalationReason, context: str = "") -> None:
+    def _escalate(self, reason: EscalationReason, context: str = "") -> NoReturn:
         """Record escalation, update run status, raise EscalationError."""
         event = EscalationEvent(
             escalation_id=str(uuid.uuid4()),

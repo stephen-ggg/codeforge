@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -41,7 +42,7 @@ def sm(minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path) -> 
     return machine
 
 
-def _gate_events(run_log_dir: Path, run_id: str) -> list[dict]:
+def _gate_events(run_log_dir: Path, run_id: str) -> list[dict[str, Any]]:
     path = run_log_dir / run_id / "events.jsonl"
     events = [json.loads(line) for line in path.read_text().splitlines()]
     return [e for e in events if e.get("event_type") == "gate"]
@@ -108,7 +109,7 @@ def test_escalation_without_phase_sets_none(sm: StateMachine) -> None:
 # ----------------------------------------------------------------------
 
 
-def _block_output(summary: str) -> AgentOutput:
+def _block_output(summary: str) -> AgentOutput[dict[str, str]]:
     """AgentOutput carrying a severity=block flag and a summary-bearing payload."""
     return AgentOutput(
         output={"verdict": "error", "summary": summary},
@@ -125,7 +126,7 @@ def _block_output(summary: str) -> AgentOutput:
     )
 
 
-def _block_gate_result(output: AgentOutput) -> GateResult:
+def _block_gate_result(output: AgentOutput[dict[str, str]]) -> GateResult:
     gr = GateResult()
     gr.policy_passed = False
     gr.escalation_reason = "block_flag"
@@ -397,7 +398,7 @@ def test_build_env_fix_context_is_firewall_safe_projection() -> None:
     assert "code_artifact" not in json.dumps(ctx)
 
 
-def _routing_events(sm: StateMachine) -> list[dict]:
+def _routing_events(sm: StateMachine) -> list[dict[str, Any]]:
     return [
         json.loads(line)
         for line in (sm._run_log_dir / sm.run.run_id / "events.jsonl").read_text().splitlines()

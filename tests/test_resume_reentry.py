@@ -58,21 +58,21 @@ def _escalation(
     )
 
 
-def test_no_escalations_returns_none_no_prompt():
+def test_no_escalations_returns_none_no_prompt() -> None:
     escalation, needs_prompt = _select_resume_escalation(_run())
     assert escalation is None
     assert needs_prompt is False
     assert _initial_state_from(escalation) == "requirements"
 
 
-def test_unresolved_escalation_prompts():
+def test_unresolved_escalation_prompts() -> None:
     esc = _escalation(resolved=False)
     escalation, needs_prompt = _select_resume_escalation(_run(esc))
     assert escalation is esc
     assert needs_prompt is True
 
 
-def test_resolved_escalation_silent_reentry():
+def test_resolved_escalation_silent_reentry() -> None:
     esc = _escalation(resolved=True, reentry_state="test_execution")
     escalation, needs_prompt = _select_resume_escalation(_run(esc))
     assert escalation is esc
@@ -81,7 +81,7 @@ def test_resolved_escalation_silent_reentry():
     assert _initial_state_from(escalation) == "test_execution"
 
 
-def test_latest_escalation_wins_over_earlier_resolved():
+def test_latest_escalation_wins_over_earlier_resolved() -> None:
     earlier = _escalation(resolved=True, reentry_state="coding")
     later = _escalation(resolved=False)
     escalation, needs_prompt = _select_resume_escalation(_run(earlier, later))
@@ -89,7 +89,7 @@ def test_latest_escalation_wins_over_earlier_resolved():
     assert needs_prompt is True
 
 
-def test_resolved_without_directive_defaults_to_requirements():
+def test_resolved_without_directive_defaults_to_requirements() -> None:
     esc = _escalation(resolved=True, reentry_state=None)
     escalation, needs_prompt = _select_resume_escalation(_run(esc))
     assert needs_prompt is False

@@ -9,6 +9,7 @@ source code to the LLM.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from codeforge.agents.test_designer import TestDesignerAgent
 from codeforge.firewall.assembler import ContextPackage
@@ -35,7 +36,7 @@ def test_block_flag_when_code_artifact_present() -> None:
     assert flags[0]["severity"] == "block"
 
 
-def _env_fix_context() -> dict:
+def _env_fix_context() -> dict[str, Any]:
     return {
         "trigger": "test_error_environment",
         "test_summary": "pytest could not collect tests",

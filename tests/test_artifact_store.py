@@ -10,11 +10,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codeforge.schemas.contracts import AgentOutput
+from codeforge.schemas.contracts import AgentOutput, ArtifactMeta
 from codeforge.store.artifact_store import ArtifactStore
 
 
-def _output(summary: str, confidence: float = 0.9) -> AgentOutput:
+def _output(summary: str, confidence: float = 0.9) -> AgentOutput[dict[str, str]]:
     return AgentOutput(
         output={"verdict": "error", "summary": summary},
         assumptions_made=[],
@@ -23,7 +23,7 @@ def _output(summary: str, confidence: float = 0.9) -> AgentOutput:
     )
 
 
-def _write(store: ArtifactStore, *, failed: bool, summary: str):
+def _write(store: ArtifactStore, *, failed: bool, summary: str) -> ArtifactMeta:
     writer = store.write_failed if failed else store.write
     return writer(
         artifact_type="test_analysis",
