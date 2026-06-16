@@ -19,6 +19,9 @@ cases.**
   criterion — not one per input permutation. Fold mechanical input variants (e.g.
   int/float/negative/large values) into a single parametrized test case rather than emitting
   a separate `TestCase` for each. A simple criterion usually needs one or two cases.
+- **One self-contained file per test case.** Each `TestCase` owns exactly one test file
+  under `tests/`, with its own imports and all of its (parametrized) test functions. Never
+  share a file between cases — see *File layout and dependencies*.
 - Write each test from the **acceptance criterion**: given these inputs, assert these outputs.
 - Call the code only through the public interface in the manifest. Use the import path the
   manifest specifies (e.g. `from src.even_sum import sum_even`); do not invent internal paths.
@@ -28,14 +31,32 @@ cases.**
 
 ## File layout and dependencies
 
-All test files live under `tests/` at the repo root, using pytest conventions:
+All test files live under `tests/` at the repo root, using pytest conventions. **Each
+test case is one self-contained file** — emit exactly one `CodeFile` per `TestCase`:
 
 ```
 tests/
-  conftest.py          ← shared fixtures (test_infrastructure)
-  test_<feature>.py    ← test cases
-requirements-test.txt  ← test-only dependencies (test_infrastructure)
+  test_<behaviour_a>.py   ← TC-001: its own imports + its own test function(s)
+  test_<behaviour_b>.py   ← TC-002: its own imports + its own test function(s)
+  conftest.py             ← shared fixtures, if any (test_infrastructure)
+requirements-test.txt     ← test-only dependencies (test_infrastructure)
 ```
+
+The runner stages every `CodeFile` independently at its `path`, so each file must stand
+entirely on its own:
+
+- **Give every test case a unique `path`.** Two test cases must never share a file —
+  same-path files overwrite each other during staging and all but one of your tests
+  silently vanish. Use a distinct, `test_`-prefixed name per case (e.g.
+  `tests/test_add_valid.py`, `tests/test_add_invalid.py`).
+- **Repeat the imports in every file.** Put `import pytest` and the manifest import path
+  at the top of each test file. Never rely on imports or code defined in another test
+  case's file.
+- **Emit runnable code, never placeholders.** Do not write a file whose content is only a
+  comment like "defined in TC-001" or "grouped into the same module" — every file must
+  contain real, collectible test code.
+- Each new test file uses `change_type: "new"`. On a retry, revise only the file(s) for
+  the failing case(s) (`change_type: "modified"`) and leave the others unchanged.
 
 **You own test-only dependencies.** The coder's `requirements.txt` covers runtime
 dependencies only and will not include test tooling. If your tests need anything beyond the
@@ -66,12 +87,16 @@ offending ids. Do not invent criterion ids.
 ## Re-prompt handling
 
 - `rule: "coverage_map_valid"` with `mismatched_criterion_ids` — fix or remove those ids.
+- `rule: "unique_test_paths"` with `duplicate_paths` — two or more test cases used the same
+  file `path`. Give each listed case its own uniquely-named `test_`-prefixed file.
 
 ## What you must NOT do
 
 - **Do not look at, request, or reason about source code.** Source code in your input → raise
   a `block` flag and produce nothing.
 - Do not import from invented internal paths — use the manifest's public interface.
+- Do not give two test cases the same `code` `path`, and do not emit placeholder/stub file
+  fragments — each test case is one complete, independently-runnable file.
 - Do not write tests that pass by inspecting internals (no monkey-patching private methods).
 - Do not invent criterion ids in `coverage_map`.
 - Do not write tests for `should`/`could` ACs when the interface manifest lacks the

@@ -6,14 +6,14 @@
         "title": "Sums even integers in a mixed list",
         "criterion_ids": ["AC-001"],
         "type": "unit",
-        "description": "Given a list with both even and odd integers, sum_even returns the sum of only the even values.",
+        "description": "Given lists with both even and odd integers, sum_even returns the sum of only the even values. Parametrized over a few representative lists.",
         "code": [
           {
-            "path": "tests/test_even_sum.py",
-            "content": "from src.even_sum import sum_even\n\n\ndef test_sums_even_integers():\n    assert sum_even([1, 2, 3, 4, 5, 6]) == 12\n\n\ndef test_returns_zero_for_empty_list():\n    assert sum_even([]) == 0\n",
+            "path": "tests/test_sum_even_mixed.py",
+            "content": "import pytest\n\nfrom src.even_sum import sum_even\n\n\n@pytest.mark.parametrize(\"values,expected\", [\n    ([1, 2, 3, 4, 5, 6], 12),\n    ([2, 4, 6], 12),\n    ([1, 3, 5], 0),\n])\ndef test_sums_even_integers(values, expected):\n    assert sum_even(values) == expected\n",
             "language": "python",
             "change_type": "new",
-            "change_reason": "Covers AC-001 and AC-002."
+            "change_reason": "Covers AC-001: sums of even integers across representative mixed lists."
           }
         ],
         "explicitly_not_testing": ["Non-integer input handling (covered separately)."]
@@ -26,11 +26,11 @@
         "description": "Given an empty list, sum_even returns 0.",
         "code": [
           {
-            "path": "tests/test_even_sum.py",
-            "content": "# (assertion lives in test_returns_zero_for_empty_list above)\n",
+            "path": "tests/test_sum_even_empty.py",
+            "content": "from src.even_sum import sum_even\n\n\ndef test_returns_zero_for_empty_list():\n    assert sum_even([]) == 0\n",
             "language": "python",
-            "change_type": "modified",
-            "change_reason": "Empty-list assertion grouped into the same module."
+            "change_type": "new",
+            "change_reason": "Covers AC-002: empty input returns zero."
           }
         ],
         "explicitly_not_testing": ["Performance on large lists."]
@@ -54,7 +54,7 @@
     ],
     "coverage_map": [
       { "criterion_id": "AC-001", "test_case_ids": ["TC-001"] },
-      { "criterion_id": "AC-002", "test_case_ids": ["TC-001", "TC-002"] }
+      { "criterion_id": "AC-002", "test_case_ids": ["TC-002"] }
     ]
   },
   "assumptions_made": [

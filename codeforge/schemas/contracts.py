@@ -134,6 +134,7 @@ GateRule = Literal[
     "ac_coverage_must",
     "arch_criteria_coverage",
     "coverage_map_valid",
+    "unique_test_paths",
     "requirements_txt_present",
     "schema_version_match",
     "global_ceiling",
@@ -293,6 +294,7 @@ class ContractViolationRePrompt(BaseModel):
     findings_missing_for_verdict: str | None = None
     missing_spec_gap_for: list[str] | None = None
     missing_requirements_txt: bool | None = None
+    duplicate_paths: list[str] | None = None
 
 
 class LowConfidenceRePrompt(BaseModel):

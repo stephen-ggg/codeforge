@@ -8,7 +8,11 @@ import pytest
 
 from codeforge.orchestrator.event_log import EventLog
 from codeforge.orchestrator.gates import GateEvaluator
-from codeforge.schemas.contracts import RetryCounters, SecurityReviewerOutput
+from codeforge.schemas.contracts import (
+    RetryCounters,
+    SecurityReviewerOutput,
+    TestDesignerOutput,
+)
 from codeforge.schemas.validation import OutputValidator
 
 _CONFIG: dict[str, Any] = {
@@ -77,3 +81,57 @@ def test_d9_critical_severity_forces_fail_verdict(gates: GateEvaluator) -> None:
     assert result.passed
     assert result.parsed_output is not None
     assert result.parsed_output.output.verdict == "fail"
+
+
+def _test_designer_envelope(path_a: str, path_b: str) -> str:
+    def _case(cid: str, path: str) -> dict[str, Any]:
+        return {
+            "id": cid, "title": f"case {cid}", "criterion_ids": ["AC-001"],
+            "type": "unit", "description": "d",
+            "code": [{
+                "path": path, "content": "def test_x():\n    assert True\n",
+                "language": "python", "change_type": "new", "change_reason": None,
+            }],
+            "explicitly_not_testing": [],
+        }
+    return json.dumps({
+        "output": {
+            "test_cases": [_case("TC-001", path_a), _case("TC-002", path_b)],
+            "test_infrastructure": [],
+            "coverage_map": [{"criterion_id": "AC-001", "test_case_ids": ["TC-001", "TC-002"]}],
+        },
+        "assumptions_made": [], "confidence": 0.9, "unresolved_flags": [],
+    })
+
+
+def _evaluate_test_designer(gates: GateEvaluator, raw: str) -> Any:
+    return gates.evaluate(
+        raw=raw,
+        expected_model=TestDesignerOutput,
+        agent_id="test_designer",
+        attempt_number=0,
+        assembly_id="assembly-1",
+        counters=RetryCounters(),
+        agent_call_count=1,
+    )
+
+
+def test_duplicate_test_paths_trigger_contract_violation(gates: GateEvaluator) -> None:
+    """Two test cases sharing one file path must fail the unique_test_paths contract
+    rule — staging overwrites same-path files, so this would silently drop a test."""
+    result = _evaluate_test_designer(
+        gates, _test_designer_envelope("tests/test_x.py", "tests/test_x.py")
+    )
+    assert result.contract_passed is False
+    assert result.violation_reprompt is not None
+    assert result.violation_reprompt.rule == "unique_test_paths"
+    assert result.violation_reprompt.duplicate_paths == ["tests/test_x.py"]
+
+
+def test_unique_test_paths_pass_contract(gates: GateEvaluator) -> None:
+    """Distinct file paths (one self-contained file per test case) pass the contract."""
+    result = _evaluate_test_designer(
+        gates, _test_designer_envelope("tests/test_x.py", "tests/test_y.py")
+    )
+    assert result.contract_passed is True
+    assert result.violation_reprompt is None

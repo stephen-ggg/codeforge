@@ -280,6 +280,32 @@ class OutputValidator:
 
         # ---- Test designer ----
         if agent_id == "test_designer" and isinstance(payload, TestSuite):
+            # unique_test_paths: every CodeFile the runner stages must have a distinct
+            # path. Staging overwrites same-path files (last write wins), so two test
+            # cases sharing a path silently drops all but one. Each test case owns its
+            # own uniquely-named file.
+            staged_paths = [cf.path for tc in payload.test_cases for cf in tc.code]
+            staged_paths += [cf.path for cf in payload.test_infrastructure]
+            seen: set[str] = set()
+            duplicate_paths: list[str] = []
+            for p in staged_paths:
+                if p in seen and p not in duplicate_paths:
+                    duplicate_paths.append(p)
+                seen.add(p)
+            if duplicate_paths:
+                return False, self._make_violation(
+                    rule="unique_test_paths",
+                    detail=(
+                        "two or more CodeFiles share the same path "
+                        f"({', '.join(duplicate_paths)}); staging overwrites same-path "
+                        "files, so each test case must emit its own uniquely-named file"
+                    ),
+                    duplicate_paths=duplicate_paths,
+                    attempt_number=attempt_number,
+                    original_input_ref=original_input_ref,
+                    counter="malformed_output",
+                )
+
             # coverage_map_valid: AC ids in coverage_map must be a valid set
             # Full cross-check against requirements_doc happens in orchestrator routing.
             # Structural check here: no entry missing criterion_id.
