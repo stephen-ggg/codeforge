@@ -141,8 +141,7 @@ class CommitWriter:
                 repo.git.checkout("-b", branch_name)
 
             # Write source files
-            output_dir = src_cfg.output_dir or "src"
-            _write_code_artifact(source_repo_path, code_artifact, output_dir)
+            _write_code_artifact(source_repo_path, code_artifact)
             _write_test_suite(source_repo_path, test_suite)
 
             # Commit
@@ -187,15 +186,12 @@ class CommitWriter:
 # File writing helpers
 # ---------------------------------------------------------------------------
 
-def _write_code_artifact(
-    repo_root: Path, code_artifact: CodeArtifact, output_dir: str
-) -> None:
+def _write_code_artifact(repo_root: Path, code_artifact: CodeArtifact) -> None:
+    # Paths are project-root-relative (src/foo.py, requirements.txt, ...) and are
+    # written verbatim — matching how the test runner stages files. Do NOT re-prefix
+    # with an output dir or the files land at src/src/foo.py.
     for f in code_artifact.files:
-        if f.path == "requirements.txt":
-            target = repo_root / "requirements.txt"
-        else:
-            target = repo_root / output_dir / f.path
-
+        target = repo_root / f.path
         if f.change_type == "deleted":
             if target.exists():
                 target.unlink()
@@ -205,18 +201,17 @@ def _write_code_artifact(
 
 
 def _write_test_suite(repo_root: Path, test_suite: TestSuite) -> None:
+    # Test paths are project-root-relative too (tests/test_foo.py, conftest.py,
+    # requirements-test.txt) — written verbatim, no tests/ re-prefix.
     for test_case in test_suite.test_cases:
         for f in test_case.code:
-            target = repo_root / "tests" / f.path
+            target = repo_root / f.path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f.content, encoding="utf-8")
 
     for f in test_suite.test_infrastructure:
-        if f.path == "requirements-test.txt":
-            target = repo_root / "requirements-test.txt"
-        else:
-            target = repo_root / "tests" / f.path
-            target.parent.mkdir(parents=True, exist_ok=True)
+        target = repo_root / f.path
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f.content, encoding="utf-8")
 
 

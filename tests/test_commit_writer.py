@@ -113,7 +113,7 @@ def test_commit_codeforge_state_unborn_head(
 
 def _source_commit_input() -> CommitWriterInput:
     code_artifact = CodeArtifact(
-        files=[CodeFile(path="math.py", content="def add(a, b):\n    return a + b\n",
+        files=[CodeFile(path="src/math.py", content="def add(a, b):\n    return a + b\n",
                         language="python", change_type="new")],
         change_summary="add",
         criteria_addressed=["AC-001"],
@@ -123,7 +123,7 @@ def _source_commit_input() -> CommitWriterInput:
         test_cases=[TestCase(
             id="T-001", title="add", criterion_ids=["AC-001"], type="unit",
             description="adds", explicitly_not_testing=[],
-            code=[CodeFile(path="test_math.py", content="def test_add():\n    assert True\n",
+            code=[CodeFile(path="tests/test_math.py", content="def test_add():\n    assert True\n",
                            language="python", change_type="new")],
         )],
         test_infrastructure=[],
@@ -173,5 +173,8 @@ def test_commit_source_code_unborn_head_local_only(
     assert result.commit_sha is not None
     assert result.pr_url is None
     assert repo.active_branch.name == "codeforge/run-abc123"
+    # Paths written verbatim — no src/src or tests/tests duplication.
     assert (source_path / "src" / "math.py").exists()
     assert (source_path / "tests" / "test_math.py").exists()
+    assert not (source_path / "src" / "src").exists()
+    assert not (source_path / "tests" / "tests").exists()
