@@ -89,6 +89,7 @@ class RouterResult:
     model_used: str                         # actual model that responded (may be fallback)
     thinking: str | None = None             # raw reasoning, for raw_outputs/ — not validated
     usage: dict[str, Any] = field(default_factory=dict)
+    truncated: bool = False                  # finish_reason == "length": output hit max_tokens
 
 
 class RouterError(Exception):
@@ -248,10 +249,17 @@ class ModelRouter:
 
         response = litellm.completion(**kwargs)
 
-        message = response.choices[0].message
+        choice = response.choices[0]
+        message = choice.message
         raw_content = getattr(message, "content", None)
         text, thinking = self._extract_content(raw_content, message)
         json_text = self._extract_json(text)
+
+        # finish_reason == "length" means the model hit max_tokens and the response is
+        # truncated mid-output — the JSON will not parse. Surface it as a distinct signal
+        # so the orchestrator can escalate with a clear reason instead of burning
+        # malformed_output re-prompts that just re-truncate at the same ceiling.
+        truncated = getattr(choice, "finish_reason", None) == "length"
 
         litellm_call_id: str = (
             getattr(response, "_hidden_params", {}).get("litellm_call_id")
@@ -274,6 +282,7 @@ class ModelRouter:
             model_used=model,
             thinking=thinking,
             usage=usage,
+            truncated=truncated,
         )
 
     @staticmethod

@@ -65,8 +65,12 @@ class CommitWriter:
             # Stage only the project-state/ subtree
             repo.git.add("project-state/")
 
-            # Nothing to commit is not an error — maybe this run produced no state changes
-            if not repo.index.diff("HEAD") and not repo.untracked_files:
+            # Nothing to commit is not an error — maybe this run produced no state changes.
+            # On a brand-new repo with no initial commit, HEAD is unborn and cannot be
+            # diffed against (GitPython raises BadName), so only run the diff-against-HEAD
+            # short-circuit when HEAD already resolves to a commit. With an unborn HEAD we
+            # fall through and let index.commit create the initial commit.
+            if repo.head.is_valid() and not repo.index.diff("HEAD") and not repo.untracked_files:
                 commit_sha = repo.head.commit.hexsha
                 return CommitWriterResult(
                     target="codeforge_state",
@@ -119,15 +123,25 @@ class CommitWriter:
             source_repo_path = Path(src_cfg.path)
             repo = git.Repo(source_repo_path)
 
-            # Start from a clean default branch
-            repo.git.checkout(src_cfg.default_branch)
-
             branch_name = f"{src_cfg.branch_prefix}{input.run_id}"
-            repo.git.checkout("-b", branch_name)
+
+            # Start from a clean default branch when the repo already has history.
+            # On a brand-new repo with no commits, HEAD is unborn: there is no
+            # default-branch commit to base off (`git checkout <default>` errors with
+            # "pathspec did not match"), so we branch directly off the unborn HEAD and
+            # the commit below becomes the repo's initial commit.
+            if repo.head.is_valid():
+                repo.git.checkout(src_cfg.default_branch)
+
+            # Create the feature branch, or reuse it on a resume/retry where a prior
+            # attempt already created it (`checkout -b` errors if it exists).
+            if branch_name in (h.name for h in repo.heads):
+                repo.git.checkout(branch_name)
+            else:
+                repo.git.checkout("-b", branch_name)
 
             # Write source files
-            output_dir = src_cfg.output_dir or "src"
-            _write_code_artifact(source_repo_path, code_artifact, output_dir)
+            _write_code_artifact(source_repo_path, code_artifact)
             _write_test_suite(source_repo_path, test_suite)
 
             # Commit
@@ -136,20 +150,22 @@ class CommitWriter:
             commit = repo.index.commit(message)
             commit_sha = commit.hexsha
 
-            # Push
-            remote = _get_or_add_remote(repo, src_cfg.remote, "origin")
-            repo.git.push(remote, f"{branch_name}:{branch_name}", "--set-upstream")
-
-            # Open PR
-            pr_url = _open_pull_request(
-                github_token=self._config.github_token,
-                remote_url=src_cfg.remote,
-                branch_name=branch_name,
-                pr_target=src_cfg.pr_target,
-                auto_merge=src_cfg.auto_merge,
-                input=input,
-                commit_sha=commit_sha,
-            )
+            # Push + open PR only when a remote is configured. A local-only project
+            # (empty remote) commits to the local branch and stops there — mirrors the
+            # remote guard in commit_codeforge_state.
+            pr_url: str | None = None
+            if src_cfg.remote:
+                remote = _get_or_add_remote(repo, src_cfg.remote, "origin")
+                repo.git.push(remote, f"{branch_name}:{branch_name}", "--set-upstream")
+                pr_url = _open_pull_request(
+                    github_token=self._config.github_token,
+                    remote_url=src_cfg.remote,
+                    branch_name=branch_name,
+                    pr_target=src_cfg.pr_target,
+                    auto_merge=src_cfg.auto_merge,
+                    input=input,
+                    commit_sha=commit_sha,
+                )
 
             return CommitWriterResult(
                 target="source_code",
@@ -170,15 +186,12 @@ class CommitWriter:
 # File writing helpers
 # ---------------------------------------------------------------------------
 
-def _write_code_artifact(
-    repo_root: Path, code_artifact: CodeArtifact, output_dir: str
-) -> None:
+def _write_code_artifact(repo_root: Path, code_artifact: CodeArtifact) -> None:
+    # Paths are project-root-relative (src/foo.py, requirements.txt, ...) and are
+    # written verbatim — matching how the test runner stages files. Do NOT re-prefix
+    # with an output dir or the files land at src/src/foo.py.
     for f in code_artifact.files:
-        if f.path == "requirements.txt":
-            target = repo_root / "requirements.txt"
-        else:
-            target = repo_root / output_dir / f.path
-
+        target = repo_root / f.path
         if f.change_type == "deleted":
             if target.exists():
                 target.unlink()
@@ -188,18 +201,17 @@ def _write_code_artifact(
 
 
 def _write_test_suite(repo_root: Path, test_suite: TestSuite) -> None:
+    # Test paths are project-root-relative too (tests/test_foo.py, conftest.py,
+    # requirements-test.txt) — written verbatim, no tests/ re-prefix.
     for test_case in test_suite.test_cases:
         for f in test_case.code:
-            target = repo_root / "tests" / f.path
+            target = repo_root / f.path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f.content, encoding="utf-8")
 
     for f in test_suite.test_infrastructure:
-        if f.path == "requirements-test.txt":
-            target = repo_root / "requirements-test.txt"
-        else:
-            target = repo_root / "tests" / f.path
-            target.parent.mkdir(parents=True, exist_ok=True)
+        target = repo_root / f.path
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f.content, encoding="utf-8")
 
 

@@ -3,12 +3,12 @@ store/artifact_store.py — Filesystem-backed artifact store.
 
 Each codeforge run gets its own directory under run-logs/<run_id>/:
   artifacts/         — validated agent outputs (AgentOutput + ArtifactMeta), one JSON per artifact
-  raw_outputs/       — raw LLM responses before validation, for debugging only
+  raw_outputs/       — raw LLM responses that failed validation and were dropped, for debugging
 
 Key behaviours:
   - write() stamps ArtifactMeta (UUID, ISO timestamp, SHA-256 content hash) and persists to disk
   - read() enforces allowed_consumers / forbidden_consumers before returning; raises AccessDeniedError
-  - write_raw() stores pre-validation output to raw_outputs/ — never mixed with validated artifacts
+  - write_raw() stores a dropped, validation-failed output to raw_outputs/ — never mixed with validated artifacts
   - get_latest() returns the most recently written artifact of a given type, or None
   - exists() checks whether any artifact of a given type has been written this run
 """
@@ -76,8 +76,13 @@ class ArtifactStore:
         self._run_dir = run_dir
         self._artifacts_dir = run_dir / "artifacts"
         self._raw_outputs_dir = run_dir / "raw_outputs"
+        # Blocked/low-confidence outputs go here, kept OUT of artifacts/ so the
+        # get_latest/get_latest_meta/exists queries (which glob artifacts/) never
+        # surface a failed output to the assembler or to resume. For debugging only.
+        self._failed_dir = run_dir / "failed_artifacts"
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._raw_outputs_dir.mkdir(parents=True, exist_ok=True)
+        self._failed_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Write validated artifact
@@ -100,6 +105,63 @@ class ArtifactStore:
         Stamps ArtifactMeta with a fresh UUID, ISO 8601 timestamp, and SHA-256 of
         the serialised output field. Returns the stamped ArtifactMeta.
         """
+        return self._write_to(
+            dest_dir=self._artifacts_dir,
+            artifact_type=artifact_type,
+            produced_by=produced_by,
+            output=output,
+            run_id=run_id,
+            codeforge_version=codeforge_version,
+            schema_version=schema_version,
+            allowed_consumers=allowed_consumers,
+            forbidden_consumers=forbidden_consumers,
+        )
+
+    def write_failed(
+        self,
+        artifact_type: ArtifactType,
+        produced_by: AgentId,
+        output: AgentOutput[Any],
+        run_id: str,
+        codeforge_version: str,
+        schema_version: str,
+        allowed_consumers: list[LogActor],
+        forbidden_consumers: list[LogActor],
+    ) -> ArtifactMeta:
+        """
+        Persist the output of a blocked / low-confidence (escalated) invocation.
+
+        Identical on-disk shape to write(), but stored under failed_artifacts/ so it
+        is recoverable for debugging (linked from the gate event and escalation record)
+        WITHOUT being visible to get_latest/get_latest_meta/exists — which only glob
+        artifacts/. This keeps a failed output from being silently consumed by the
+        context assembler or by resume as if it were a valid artifact.
+        """
+        return self._write_to(
+            dest_dir=self._failed_dir,
+            artifact_type=artifact_type,
+            produced_by=produced_by,
+            output=output,
+            run_id=run_id,
+            codeforge_version=codeforge_version,
+            schema_version=schema_version,
+            allowed_consumers=allowed_consumers,
+            forbidden_consumers=forbidden_consumers,
+        )
+
+    def _write_to(
+        self,
+        dest_dir: Path,
+        artifact_type: ArtifactType,
+        produced_by: AgentId,
+        output: AgentOutput[Any],
+        run_id: str,
+        codeforge_version: str,
+        schema_version: str,
+        allowed_consumers: list[LogActor],
+        forbidden_consumers: list[LogActor],
+    ) -> ArtifactMeta:
+        """Stamp ArtifactMeta, serialise, and write <artifact_id>.json into dest_dir."""
         artifact_id = str(uuid.uuid4())
         created_at = datetime.now(timezone.utc).isoformat()
 
@@ -126,7 +188,7 @@ class ArtifactStore:
             "output": output_dict,
         }
 
-        artifact_path = self._artifacts_dir / f"{artifact_id}.json"
+        artifact_path = dest_dir / f"{artifact_id}.json"
         artifact_path.write_text(
             json.dumps(record, indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -138,19 +200,25 @@ class ArtifactStore:
     # Write raw (pre-validation) output
     # ------------------------------------------------------------------
 
-    def write_raw(self, artifact_id: str, raw: str) -> None:
+    def write_raw(self, raw: str, produced_by: str | None = None) -> str:
         """
-        Store the raw LLM response string before validation.
+        Persist a raw, pre-validation LLM response string and return its id.
 
-        Goes to raw_outputs/<artifact_id>.json — never mixed with validated artifacts.
-        Called by the orchestrator immediately after receiving the LLM response,
-        before structural validation runs.
+        Goes to raw_outputs/<artifact_id>.json — isolated from validated artifacts and
+        invisible to get_latest/get_latest_meta/exists. Used to capture an output that
+        failed structural or contract validation and was about to be dropped, so the
+        escalation record can link to it for debugging.
         """
+        artifact_id = str(uuid.uuid4())
         raw_path = self._raw_outputs_dir / f"{artifact_id}.json"
         raw_path.write_text(
-            json.dumps({"artifact_id": artifact_id, "raw": raw}, ensure_ascii=False),
+            json.dumps(
+                {"artifact_id": artifact_id, "produced_by": produced_by, "raw": raw},
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
+        return artifact_id
 
     # ------------------------------------------------------------------
     # Read validated artifact

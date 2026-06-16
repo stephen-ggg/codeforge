@@ -44,6 +44,15 @@ _REENTRY_BY_REASON: dict[str, list[str]] = {
     "low_confidence": ["requirements_clarification", "architecture", "coding"],
     "global_ceiling_exceeded": [],
     "malformed_output": ["requirements_clarification"],
+    "output_truncated": [
+        "requirements_clarification",
+        "architecture",
+        "coding",
+        "code_review",
+        "test_design",
+        "test_execution",
+        "commit",
+    ],
     "commit_failure": ["commit"],
     "human_required": [
         "requirements_clarification",

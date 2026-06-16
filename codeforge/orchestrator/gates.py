@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import BaseModel
+
 from codeforge.schemas.contracts import (
     AgentId,
     AgentOutput,
@@ -23,6 +25,7 @@ from codeforge.schemas.contracts import (
     ContractViolationRePrompt,
     CountersSnapshot,
     EscalationReason,
+    GateRule,
     MalformedOutputRePrompt,
     RequirementsDoc,
     RetryCounters,
@@ -46,6 +49,11 @@ class GateResult:
         self.violation_reprompt: ContractViolationRePrompt | None = None
         self.escalation_reason: EscalationReason | None = None
         self.verdict_forced: bool = False  # D9: error/critical severity forced fail
+        # Populated on a terminal policy failure (block_flag / low_confidence) so the
+        # state machine can persist the offending output and emit the failing gate
+        # event with a real artifact_ref. See GateEvaluator.evaluate().
+        self.parsed_output: AgentOutput[Any] | None = None
+        self.policy_gate_rule: GateRule | None = None
 
     @property
     def passed(self) -> bool:
@@ -93,7 +101,7 @@ class GateEvaluator:
     def evaluate(
         self,
         raw: str,
-        expected_model: type,
+        expected_model: type[BaseModel],
         agent_id: AgentId,
         attempt_number: int,
         assembly_id: str,
@@ -124,7 +132,7 @@ class GateEvaluator:
             source_agent=agent_id,
             counters=counters_snap,
             detail="structural validation against Pydantic model" if structural_ok
-                   else f"validation errors: {len(malformed.validation_errors) if malformed else 0}",
+                   else self._format_malformed_detail(malformed),
         )
 
         if not structural_ok:
@@ -132,14 +140,20 @@ class GateEvaluator:
             result.malformed_reprompt = malformed
             return result
 
-        # Parse the validated output
+        # Parse the validated output. Use the (parametrized) expected_model so the
+        # nested payload is a typed instance — D9 severity-force and downstream
+        # consumers rely on isinstance(output.output, ...) holding.
         import json
         from typing import cast
         data = json.loads(raw)
-        output: AgentOutput[Any] = AgentOutput(**data)
+        output: AgentOutput[Any] = cast("AgentOutput[Any]", expected_model.model_validate(data))
 
         # --- D9: force verdict to fail if error/critical severity present ---
         self._apply_severity_force(output, agent_id)
+
+        # Expose the typed, D9-mutated output so the state machine consumes it
+        # directly instead of re-parsing the raw string (which would lose D9).
+        result.parsed_output = output
 
         # --- Contract validation ---
         contract_ok, violation = self._validator.validate_contract(
@@ -185,16 +199,13 @@ class GateEvaluator:
         )
 
         if not policy_ok:
-            block_rule: GateRuleType = "block_flag_present"
-            conf_rule: GateRuleType = "confidence_threshold"
-            l3_rule = block_rule if escalation_reason == "block_flag" else conf_rule
-            self._log.emit_gate(
-                rule=l3_rule,
-                passed=False,
-                source_agent=agent_id,
-                counters=counters_snap,
-                detail=f"escalation_reason={escalation_reason}",
-            )
+            # Asymmetry: the PASSING policy gate is emitted below, but the FAILING one
+            # is emitted by the state machine (_handle_policy_escalation) after it has
+            # persisted the offending output — so the gate event can carry a real
+            # artifact_ref and a self-sufficient detail (flag reason + summary).
+            block_rule: GateRule = "block_flag_present"
+            conf_rule: GateRule = "confidence_threshold"
+            result.policy_gate_rule = block_rule if escalation_reason == "block_flag" else conf_rule
             result.policy_passed = False
             result.escalation_reason = escalation_reason
             return result
@@ -301,6 +312,24 @@ class GateEvaluator:
                 )
 
         return True, None
+
+    @staticmethod
+    def _format_malformed_detail(malformed: MalformedOutputRePrompt | None) -> str:
+        """
+        Build a self-sufficient schema_valid failure detail: the count PLUS each failing
+        field's path, error type, and the validator's expectation message. This is what
+        makes events.jsonl alone enough to see WHICH field is malformed (the offending
+        value itself is never included — ValidationError.received is always None).
+        """
+        if malformed is None or not malformed.validation_errors:
+            return "validation errors: 0"
+        segments = []
+        for err in malformed.validation_errors:
+            seg = f"{err.field_path} ({err.error_type})"
+            if err.expected:
+                seg += f": {err.expected}"
+            segments.append(seg)
+        return f"validation errors: {len(malformed.validation_errors)} | " + "; ".join(segments)
 
     def _make_counters_snap(
         self,

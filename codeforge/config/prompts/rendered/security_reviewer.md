@@ -175,7 +175,7 @@ Your response payload must be a single JSON object matching the schema below. Pr
 | `output.findings` | `SecurityFinding[]` | required |
 | `output.findings[].id` | `string` | required |
 | `output.findings[].file` | `string` | required |
-| `output.findings[].line_range` | `object[] | null` | optional |
+| `output.findings[].line_range` | `[integer, integer] | null` | optional |
 | `output.findings[].category` | `'injection' | 'authentication' | 'authorisation' | 'secrets_exposure' | 'dependency_vulnerability' | 'input_validation' | 'data_exposure' | 'other'` | required |
 | `output.findings[].severity` | `'info' | 'warn' | 'critical'` | required |
 | `output.findings[].cwe` | `string | null` | optional |
