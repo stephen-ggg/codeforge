@@ -4,9 +4,9 @@
     "modules": [
       {
         "name": "EvenSum",
-        "responsibility": "Compute the sum of even integers in a list.",
+        "responsibility": "Compute the sum and count of even integers in a list.",
         "dependencies": [],
-        "exposes": ["sum_even"],
+        "exposes": ["sum_even", "count_even"],
         "consumes": []
       }
     ],
@@ -16,12 +16,33 @@
         "kind": "function",
         "owner_module": "EvenSum",
         "contract": {
-          "import_path": "src.even_sum.sum_even",
+          "module": "src.even_sum",
+          "symbol": "sum_even",
           "signature": "sum_even(numbers: list[int]) -> int",
           "parameters": [
             { "name": "numbers", "type": "list[int]", "description": "Integers to filter and sum." }
           ],
           "returns": { "type": "int", "description": "Sum of even integers; 0 if none or empty input." },
+          "raises": [
+            { "exception": "TypeError", "when": "numbers is not a list of integers." }
+          ]
+        },
+        "stability": "stable",
+        "successor": null,
+        "removal_run": null
+      },
+      {
+        "name": "count_even",
+        "kind": "function",
+        "owner_module": "EvenSum",
+        "contract": {
+          "module": "src.even_sum",
+          "symbol": "count_even",
+          "signature": "count_even(numbers: list[int]) -> int",
+          "parameters": [
+            { "name": "numbers", "type": "list[int]", "description": "Integers to filter and count." }
+          ],
+          "returns": { "type": "int", "description": "How many integers are even; 0 if none or empty input." },
           "raises": [
             { "exception": "TypeError", "when": "numbers is not a list of integers." }
           ]
@@ -38,6 +59,13 @@
         "to": "EvenSum",
         "via": "sum_even",
         "data_description": "A list of integers in; a single integer sum out."
+      },
+      {
+        "name": "CountEvenCall",
+        "from": "Caller",
+        "to": "EvenSum",
+        "via": "count_even",
+        "data_description": "A list of integers in; a single integer count out."
       }
     ],
     "tech_decisions": [

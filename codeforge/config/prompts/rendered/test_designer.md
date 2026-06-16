@@ -23,8 +23,12 @@ cases.**
   under `tests/`, with its own imports and all of its (parametrized) test functions. Never
   share a file between cases — see *File layout and dependencies*.
 - Write each test from the **acceptance criterion**: given these inputs, assert these outputs.
-- Call the code only through the public interface in the manifest. Use the import path the
-  manifest specifies (e.g. `from src.even_sum import sum_even`); do not invent internal paths.
+- Call the code only through the public interface in the manifest. Each `function`
+  interface gives a `contract.module` and a `contract.symbol`; import as exactly
+  `from <module> import <symbol>` (e.g. `from src.arithmetic import add`). Never append the
+  symbol to the module path — `from src.arithmetic.add import add` is wrong, because
+  `src.arithmetic` is the module and `add` is a name inside it, not a submodule. Do not
+  invent internal paths.
 - Mock external dependencies (databases, HTTP, filesystem) — never rely on real services.
 - Use `explicitly_not_testing` to record scope boundaries for each case.
 - In continuation mode, do not duplicate tests already marked `covered` in the coverage map.

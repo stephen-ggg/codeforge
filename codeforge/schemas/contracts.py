@@ -409,6 +409,31 @@ class InterfaceSpec(BaseModel):
     successor: str | None = None
     removal_run: str | None = None
 
+    @model_validator(mode="after")
+    def _function_contract_requires_module_and_symbol(self) -> "InterfaceSpec":
+        """A `function` interface must locate its symbol via `module` + `symbol`.
+
+        A single dotted path (e.g. `src.arithmetic.add`) is ambiguous: it could mean
+        module `src.arithmetic` with symbol `add`, or a module `src.arithmetic.add` —
+        and the coder and test_designer can read it differently, so the code the coder
+        writes and the import the test_designer emits silently disagree. Splitting the
+        location into the two fields removes the ambiguity, and rejecting a malformed
+        contract here makes it fail at architecture validation rather than as an opaque
+        pytest collection error several agent calls later. Other interface kinds keep
+        their free-form contract.
+        """
+        if self.kind != "function":
+            return self
+        for field in ("module", "symbol"):
+            value = self.contract.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"function interface '{self.name}' must define a non-empty "
+                    f"contract.{field} (e.g. module='src.arithmetic', symbol='add'); "
+                    f"got {value!r}"
+                )
+        return self
+
 
 class RequirementsSummary(BaseModel):
     """

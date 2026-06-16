@@ -19,8 +19,11 @@ src/                    ← every source file you generate goes here
 ```
 
 The runner installs `requirements.txt`, then runs `pytest tests/`. Your code must be
-importable from `src/`. Implement each interface at the exact import path the architecture
-doc specifies in its `contract` — that path is the contract the tests will import from.
+importable from `src/`. For each `function` interface, create the file named by its
+`contract.module` (e.g. `src.arithmetic` → `src/arithmetic.py`) and define a top-level
+`contract.symbol` in it. Interfaces that share a `module` go in the **same** file (e.g.
+`add` and `format_result`, both `src.arithmetic`, live together in `src/arithmetic.py`).
+That `from <module> import <symbol>` pair is the contract the tests will import from.
 
 ## Two gates fire before your code is ever reviewed
 
