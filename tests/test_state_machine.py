@@ -292,6 +292,45 @@ def test_malformed_within_budget_reprompts_without_persisting(
     assert not any(raw_dir.glob("*.json"))
 
 
+def test_malformed_exhausted_gate_links_raw(
+    sm: StateMachine, run_log_dir: Path
+) -> None:
+    """On a malformed escalation the failing schema_valid gate event must carry the
+    persisted raw output's id as artifact_ref, so events.jsonl alone links the gate line
+    to the dropped output (not just the escalation record)."""
+    sm.run.retry_counters.malformed_output = 99  # force budget exhaustion
+    gr = _malformed_gate_result()
+
+    with pytest.raises(EscalationError):
+        sm._handle_structural_failure('{"bad": ', "coder", gr)
+
+    artifact_id = sm.run.escalations[-1].agent_output_ref
+    gate = _gate_events(run_log_dir, sm.run.run_id)[-1]
+    assert gate["rule"] == "schema_valid"
+    assert gate["passed"] is False
+    assert gate["artifact_ref"] == artifact_id
+
+
+def test_contract_failure_persists_output_to_failed_artifacts(
+    sm: StateMachine, run_log_dir: Path
+) -> None:
+    """A contract-violating (but schema-valid) output is persisted to the isolated
+    failed_artifacts/ area so a contract escalation links it instead of dropping it —
+    and it must NOT leak into artifacts/ (where get_latest/resume would surface it)."""
+    gr = GateResult()
+    gr.contract_passed = False
+    gr.parsed_output = AgentOutput(
+        output={"files": []}, assumptions_made=[], confidence=0.9, unresolved_flags=[]
+    )
+
+    artifact_id = sm._persist_contract_failure(gr, "coder", "code_artifact")
+    assert artifact_id
+
+    run_dir = run_log_dir / sm.run.run_id
+    assert (run_dir / "failed_artifacts" / f"{artifact_id}.json").exists()
+    assert not (run_dir / "artifacts" / f"{artifact_id}.json").exists()
+
+
 def test_format_policy_detail_without_summary(sm: StateMachine) -> None:
     """Payloads lacking a summary degrade gracefully — no crash, segment omitted."""
     output = AgentOutput(

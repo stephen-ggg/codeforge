@@ -54,6 +54,9 @@ class GateResult:
         # event with a real artifact_ref. See GateEvaluator.evaluate().
         self.parsed_output: AgentOutput[Any] | None = None
         self.policy_gate_rule: GateRule | None = None
+        # Set on a structural failure so the state machine can emit the failing
+        # schema_valid gate with a real artifact_ref (see GateEvaluator.evaluate()).
+        self.structural_detail: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -126,18 +129,21 @@ class GateEvaluator:
             attempt_number=attempt_number,
             original_input_ref=assembly_id,
         )
-        self._log.emit_gate(
-            rule="schema_valid",
-            passed=structural_ok,
-            source_agent=agent_id,
-            counters=counters_snap,
-            detail="structural validation against Pydantic model" if structural_ok
-                   else self._format_malformed_detail(malformed),
-        )
-
-        if not structural_ok:
+        if structural_ok:
+            self._log.emit_gate(
+                rule="schema_valid",
+                passed=True,
+                source_agent=agent_id,
+                counters=counters_snap,
+                detail="structural validation against Pydantic model",
+            )
+        else:
+            # Asymmetry: the FAILING schema_valid gate is emitted by the state machine
+            # (_handle_structural_failure) AFTER it persists the raw output, so the gate
+            # event can carry a real artifact_ref. Mirrors the policy-gate asymmetry below.
             result.structural_passed = False
             result.malformed_reprompt = malformed
+            result.structural_detail = self._format_malformed_detail(malformed)
             return result
 
         # Parse the validated output. Use the (parametrized) expected_model so the

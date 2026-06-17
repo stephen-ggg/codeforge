@@ -570,6 +570,22 @@ class StateMachine:
         )
         return meta.artifact_id
 
+    def _persist_contract_failure(
+        self,
+        gate_result: GateResult,
+        agent_id: str,
+        artifact_type: str,
+    ) -> str:
+        """Persist a contract-violating (but schema-valid) output to failed_artifacts/.
+
+        Contract escalations otherwise drop the offending output entirely. The parsed
+        output is always set on a contract failure (GateEvaluator parses before contract
+        checks), so we persist it and link it from the escalation's agent_output_ref.
+        """
+        output = gate_result.parsed_output
+        assert output is not None  # always set by GateEvaluator on a contract failure
+        return self._write_failed_artifact(artifact_type, agent_id, output)
+
     def _handle_structural_failure(
         self,
         raw: str,
@@ -588,13 +604,44 @@ class StateMachine:
         """
         reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
         outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), agent_id)
-        self._apply_outcome(outcome)
         if outcome.decision == "escalate":
             artifact_id = self.artifact_store.write_raw(raw, produced_by=agent_id)
+            # Emit the failing schema_valid gate here (not in GateEvaluator) so it can link
+            # the just-persisted raw output. Skipped on a contract-only failure (structural
+            # passed) — that failing gate was already emitted by GateEvaluator.
+            self._emit_structural_fail_gate(agent_id, gate_result, artifact_ref=artifact_id)
+            self._apply_outcome(outcome)
             self._escalate(
                 outcome.escalation_reason or "malformed_output", context=artifact_id
             )
+        else:
+            self._emit_structural_fail_gate(agent_id, gate_result, artifact_ref=None)
+            self._apply_outcome(outcome)
         return reprompt
+
+    def _emit_structural_fail_gate(
+        self,
+        agent_id: str,
+        gate_result: GateResult,
+        artifact_ref: str | None,
+    ) -> None:
+        """Emit the failing schema_valid gate event for a structural (malformed) failure.
+
+        No-op when the failure was contract-only (structural passed): in that case the
+        failing gate was already emitted by GateEvaluator. On a real structural failure
+        this carries the persisted raw output's id as artifact_ref when escalating, so the
+        events.jsonl gate line links straight to the dropped output.
+        """
+        if gate_result.structural_passed:
+            return
+        self.event_log.emit_gate(
+            rule="schema_valid",
+            passed=False,
+            source_agent=cast(LogActor, agent_id),
+            counters=self._counters_snap(),
+            detail=gate_result.structural_detail or "",
+            artifact_ref=artifact_ref,
+        )
 
     def _format_policy_detail(self, gate_result: GateResult, output: Any) -> str:
         """
@@ -815,7 +862,13 @@ class StateMachine:
                 outcome = route_architecture_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "max_retries_exceeded")
+                    artifact_id = self._persist_contract_failure(
+                        gate_result, "architecture_designer", "architecture_doc"
+                    )
+                    self._escalate(
+                        outcome.escalation_reason or "max_retries_exceeded",
+                        context=artifact_id,
+                    )
                 continue
 
             if not gate_result.policy_passed:
@@ -954,7 +1007,13 @@ class StateMachine:
                     outcome = route_coding_ac_gap(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "max_retries_exceeded")
+                    artifact_id = self._persist_contract_failure(
+                        gate_result, "coder", "code_artifact"
+                    )
+                    self._escalate(
+                        outcome.escalation_reason or "max_retries_exceeded",
+                        context=artifact_id,
+                    )
                 continue
 
             if not gate_result.policy_passed:
@@ -1193,7 +1252,13 @@ class StateMachine:
                 outcome = route_test_design_covmap_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "max_retries_exceeded")
+                    artifact_id = self._persist_contract_failure(
+                        gate_result, "test_designer", "test_suite"
+                    )
+                    self._escalate(
+                        outcome.escalation_reason or "max_retries_exceeded",
+                        context=artifact_id,
+                    )
                 continue
 
             if not gate_result.policy_passed:
