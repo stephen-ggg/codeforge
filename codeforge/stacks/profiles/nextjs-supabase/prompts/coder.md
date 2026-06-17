@@ -13,7 +13,7 @@ components/               ← reusable React components (.tsx)
 lib/                      ← data access, the Supabase client, and pure logic modules (.ts)
 package.json              ← dependency manifest (ALWAYS emit it — the gate requires it)
 tsconfig.json             ← emit on a new project (strict TypeScript)
-vitest.config.ts          ← emit on a new project (jsdom env for component tests)
+vitest.config.ts          ← emit on a new project (jsdom env + @vitejs/plugin-react for component tests)
 ```
 
 - **`function` interfaces** map to a `lib/` module: `contract.module` is the import path
@@ -49,8 +49,8 @@ standard toolchain so the type-check and tests run. A workable baseline:
   },
   "devDependencies": {
     "typescript": "^5", "@types/react": "^18", "@types/node": "^20",
-    "vitest": "^2", "@testing-library/react": "^16", "@testing-library/jest-dom": "^6",
-    "jsdom": "^25"
+    "vitest": "^2", "@vitejs/plugin-react": "^4", "@testing-library/react": "^16",
+    "@testing-library/jest-dom": "^6", "jsdom": "^25"
   }
 }
 ```
@@ -58,3 +58,24 @@ standard toolchain so the type-check and tests run. A workable baseline:
 Pin versions that exist; if a `dep_fix_context` reports an install failure, correct the
 offending entry. Set `tsconfig.json` to `"strict": true` with the `@/*` path alias mapped to
 the repo root.
+
+### Test configuration
+
+Component test files use JSX **without importing React** (the modern automatic JSX
+runtime). Vitest will not transform that correctly unless `@vitejs/plugin-react` is
+registered — without it, JSX compiles via the classic transform and every component
+test fails at render with `ReferenceError: React is not defined`. So `vitest.config.ts`
+**must** load the React plugin (it defaults to the automatic runtime) and set the jsdom
+environment:
+
+```ts
+import { defineConfig } from "vitest/config";
+import react from "@vitejs/plugin-react";
+import path from "node:path";
+
+export default defineConfig({
+  plugins: [react()],
+  test: { environment: "jsdom" },
+  resolve: { alias: { "@": path.resolve(__dirname, ".") } },
+});
+```
