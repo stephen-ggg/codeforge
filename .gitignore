@@ -22,6 +22,7 @@ run-logs/
 
 # Claude Code
 .claude/worktrees/
+.claude/plans/
 
 # Editor
 .vscode/
