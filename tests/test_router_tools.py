@@ -84,6 +84,87 @@ def test_tool_loop_runs_then_returns_final_json(monkeypatch, minimal_config: Con
     assert "tool" in roles
 
 
+def _chunk(content=None, reasoning_content=None, finish_reason=None,
+           call_id=None, usage=None):
+    delta = SimpleNamespace(content=content, reasoning_content=reasoning_content)
+    chunk = SimpleNamespace(
+        choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)],
+        usage=None,
+        id=call_id,
+    )
+    # Last chunk carries usage in _hidden_params; litellm_call_id is absent on stream.
+    chunk._hidden_params = {"usage": usage} if usage is not None else {}
+    return chunk
+
+
+def test_streaming_agent_accumulates_chunks(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    # test_analyst has streaming: true in the shipped config.
+    usage_obj = SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+    chunks = [
+        _chunk(reasoning_content="thinking part 1 "),
+        _chunk(reasoning_content="thinking part 2"),
+        _chunk(content='{"output": {"ok": '),
+        _chunk(content='true}, "confidence": 0.9}'),
+        _chunk(finish_reason="stop", call_id="resp-id-123", usage=usage_obj),
+    ]
+    seen_kwargs: list[dict] = []
+
+    def fake_completion(**kwargs):
+        seen_kwargs.append(kwargs)
+        assert kwargs.get("stream") is True
+        return iter(chunks)
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
+
+    assert result.content == '{"output": {"ok": true}, "confidence": 0.9}'
+    assert result.thinking == "thinking part 1 thinking part 2"
+    # call id falls back to the provider response id (chunk.id) on streaming.
+    assert result.litellm_call_id == "resp-id-123"
+    # usage extracted from the last chunk's _hidden_params Usage object.
+    assert result.usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    assert result.truncated is False
+
+
+def test_streaming_marks_truncated_on_length(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    chunks = [
+        _chunk(content='{"output": {"ok": true'),
+        _chunk(finish_reason="length", call_id="resp-trunc"),
+    ]
+
+    monkeypatch.setattr(router_mod.litellm, "completion", lambda **kw: iter(chunks))
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
+
+    assert result.truncated is True
+
+
+def test_streaming_skipped_when_tools_present(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    # A streaming agent invoked with tools must NOT stream (tool_calls fragment
+    # across chunks); it falls back to the non-streaming tool loop.
+    def fake_completion(**kwargs):
+        assert "stream" not in kwargs
+        return _response(_msg('{"output": {}, "confidence": 1.0}'), "no-stream")
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+
+    executor = FakeExecutor()
+    router = ModelRouter(minimal_config)
+    result = router.complete(
+        agent_id="test_analyst",
+        system_prompt="s",
+        user_turn="u",
+        run_id="r",
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        tool_executor=executor,
+    )
+
+    assert result.content == '{"output": {}, "confidence": 1.0}'
+
+
 def test_no_tools_path_is_single_shot(monkeypatch, minimal_config: ConfigSnapshot) -> None:
     calls = {"n": 0}
 

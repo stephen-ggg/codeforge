@@ -70,6 +70,7 @@ class AgentConfig(BaseModel):
     fallback_model: str | None = None
     system_prompt: str = ""
     thinking: ThinkingConfig = Field(default_factory=ThinkingConfig)
+    streaming: bool = False
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
