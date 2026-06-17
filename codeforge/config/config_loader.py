@@ -85,7 +85,10 @@ class SourceCodeRepoConfig(BaseModel):
     default_branch: str = "main"
     branch_prefix: str = "codeforge/"
     pr_target: str = "main"
-    auto_merge: bool = True
+    # Local `default_branch` is canonical and accumulates each successful run by
+    # fast-forward; the remote PR is for review/visibility. Auto-squash-merging on the
+    # remote would diverge remote history from local — keep it opt-in.
+    auto_merge: bool = False
     output_dir: str = "src"
 
 

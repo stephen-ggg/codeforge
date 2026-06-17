@@ -62,7 +62,8 @@ repos:
     default_branch: "main"
     branch_prefix: "codeforge/"
     pr_target: "main"
-    auto_merge: true
+    auto_merge: false   # local main is canonical (accumulates by fast-forward); the PR
+                        # is for review. true auto-squash-merges on the remote (diverges).
     output_dir: "src"
 
 test_runner:
@@ -139,7 +140,7 @@ def _do_commit(
     from codeforge.orchestrator.routing import route_commit_state_fail, route_commit_src_fail, route_commit_success
 
     run = sm.run
-    writer = CommitWriter(config, project_dir)
+    writer = CommitWriter(config, project_dir, run_log_dir=_run_log_dir(project_dir))
     state_commit_sha: str | None = None
 
     # Commit codeforge state — retry up to codeforge_state_commit limit

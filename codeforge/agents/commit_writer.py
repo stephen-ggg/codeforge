@@ -28,6 +28,7 @@ dependency between contracts and the agent layer. Expected shapes:
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -45,9 +46,20 @@ from codeforge.store.edits import EditError, apply_edits
 
 
 class CommitWriter:
-    def __init__(self, config: ConfigSnapshot, project_dir: Path) -> None:
+    def __init__(
+        self,
+        config: ConfigSnapshot,
+        project_dir: Path,
+        run_log_dir: Path | None = None,
+    ) -> None:
         self._config = config
-        self._project_dir = project_dir
+        self._project_dir = Path(project_dir)
+        # Per-run worktrees are created under run-logs/<run_id>/ (gitignored in the
+        # state repo, namespaced per run). Defaults off project_dir for callers that
+        # don't thread it explicitly; the CLI passes the real run-logs path.
+        self._run_log_dir = (
+            Path(run_log_dir) if run_log_dir is not None else self._project_dir / "run-logs"
+        )
 
     # ------------------------------------------------------------------
     # Public methods
@@ -67,11 +79,9 @@ class CommitWriter:
             repo.git.add("project-state/")
 
             # Nothing to commit is not an error — maybe this run produced no state changes.
-            # On a brand-new repo with no initial commit, HEAD is unborn and cannot be
-            # diffed against (GitPython raises BadName), so only run the diff-against-HEAD
-            # short-circuit when HEAD already resolves to a commit. With an unborn HEAD we
-            # fall through and let index.commit create the initial commit.
-            if repo.head.is_valid() and not repo.index.diff("HEAD") and not repo.untracked_files:
+            # The state repo is bootstrapped with an initial commit at project creation, so
+            # HEAD always resolves and the diff-against-HEAD short-circuit is safe.
+            if not repo.index.diff("HEAD") and not repo.untracked_files:
                 commit_sha = repo.head.commit.hexsha
                 return CommitWriterResult(
                     target="codeforge_state",
@@ -109,8 +119,14 @@ class CommitWriter:
 
     def commit_source_code(self, input: CommitWriterInput) -> CommitWriterResult:
         """
-        Write source files to the source repo, create a branch, commit, push, open PR.
+        Build the feature commit in an isolated per-run worktree off an immutable base
+        (the current tip of the default branch), push it + open a PR, then fast-forward
+        the canonical default branch to include it. The canonical checkout is never moved
+        onto the feature branch and is never written to mid-run, so a failure anywhere
+        before the fast-forward leaves it pristine and resumable.
         """
+        worktree_dir: Path | None = None
+        repo: git.Repo | None = None
         try:
             source_data: dict[str, Any] = input.source_code or {}
             code_artifact = CodeArtifact(**source_data["code_artifact"])
@@ -123,37 +139,56 @@ class CommitWriter:
             src_cfg = repos_cfg.source_code
             source_repo_path = Path(src_cfg.path)
             repo = git.Repo(source_repo_path)
-
+            default_branch = src_cfg.default_branch
             branch_name = f"{src_cfg.branch_prefix}{input.run_id}"
 
-            # Start from a clean default branch when the repo already has history.
-            # On a brand-new repo with no commits, HEAD is unborn: there is no
-            # default-branch commit to base off (`git checkout <default>` errors with
-            # "pathspec did not match"), so we branch directly off the unborn HEAD and
-            # the commit below becomes the repo's initial commit.
-            if repo.head.is_valid():
-                repo.git.checkout(src_cfg.default_branch)
+            # The default branch is bootstrapped at project creation. Its absence means
+            # the project was not set up correctly — fail loud rather than minting it
+            # from an arbitrary HEAD (which would bless stale/wrong state as the base).
+            if not repo.head.is_valid() or default_branch not in (h.name for h in repo.heads):
+                raise ValueError(
+                    f"source repo has no '{default_branch}' branch — project was not "
+                    f"bootstrapped correctly (expected an initial commit on "
+                    f"'{default_branch}'). Create it and re-run."
+                )
 
-            # Create the feature branch, or reuse it on a resume/retry where a prior
-            # attempt already created it (`checkout -b` errors if it exists).
+            # The canonical checkout must rest on the default branch between runs; the
+            # fast-forward below advances *that* branch, so refuse to operate from any
+            # other branch rather than silently advancing the wrong ref.
+            if repo.active_branch.name != default_branch:
+                raise ValueError(
+                    f"source repo is on '{repo.active_branch.name}', expected "
+                    f"'{default_branch}' — leftover state from a prior run; reset to "
+                    f"'{default_branch}' and re-run."
+                )
+
+            base_sha = repo.commit(default_branch).hexsha  # explicit, immutable base
+
+            # Build the feature commit in a throwaway worktree off the immutable base.
+            # Idempotent across resume/retry: clear any stale worktree, reuse the branch
+            # if a prior attempt already created it.
+            worktree_dir = self._run_log_dir / input.run_id / "source-worktree"
+            worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+            _prune_worktree(repo, worktree_dir)
             if branch_name in (h.name for h in repo.heads):
-                repo.git.checkout(branch_name)
+                repo.git.worktree("add", str(worktree_dir), branch_name)
             else:
-                repo.git.checkout("-b", branch_name)
+                repo.git.worktree("add", str(worktree_dir), "-b", branch_name, base_sha)
 
-            # Write source files
-            _write_code_artifact(source_repo_path, code_artifact)
-            _write_test_suite(source_repo_path, test_suite)
+            wt = git.Repo(worktree_dir)
+            _write_code_artifact(worktree_dir, code_artifact)
+            _write_test_suite(worktree_dir, test_suite)
 
-            # Commit
-            repo.git.add("-A")
+            wt.git.add("-A")
             message = f"feat({input.feature_title}): implement {input.feature_title}"
-            commit = repo.index.commit(message)
-            commit_sha = commit.hexsha
+            # Skip the commit when nothing changed (resume after the commit already
+            # landed but a later step failed); reuse the existing branch tip.
+            if wt.git.diff("--cached", "--name-only").strip():
+                wt.git.commit("-m", message)
+            commit_sha = wt.head.commit.hexsha
 
-            # Push + open PR only when a remote is configured. A local-only project
-            # (empty remote) commits to the local branch and stops there — mirrors the
-            # remote guard in commit_codeforge_state.
+            # Push + open PR only when a remote is configured. Do this BEFORE advancing
+            # the local default branch so a push failure escalates with it left pristine.
             pr_url: str | None = None
             if src_cfg.remote:
                 remote = _get_or_add_remote(repo, src_cfg.remote, "origin")
@@ -168,6 +203,11 @@ class CommitWriter:
                     commit_sha=commit_sha,
                 )
 
+            # Advance the canonical default branch to include the feature. The base has
+            # not moved (writes went to the worktree), so this fast-forward is exact and
+            # conflict-free; it updates the canonical working tree in place.
+            repo.git.merge(branch_name, "--ff-only")
+
             return CommitWriterResult(
                 target="source_code",
                 success=True,
@@ -181,6 +221,11 @@ class CommitWriter:
                 success=False,
                 error_message=str(exc),
             )
+        finally:
+            # Tear down the worktree (keeps the branch ref for the PR). The canonical
+            # checkout is untouched on any pre-merge failure, so the run stays resumable.
+            if repo is not None and worktree_dir is not None:
+                _prune_worktree(repo, worktree_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +271,25 @@ def _write_test_suite(repo_root: Path, test_suite: TestSuite) -> None:
 # ---------------------------------------------------------------------------
 # Git helpers
 # ---------------------------------------------------------------------------
+
+def _prune_worktree(repo: git.Repo, worktree_dir: Path) -> None:
+    """Deregister and delete a per-run worktree, tolerating a missing/stale one.
+
+    Used both to clear stale state before `worktree add` and to tear down afterwards.
+    The associated branch ref is preserved (worktree removal does not delete it).
+    """
+    try:
+        repo.git.worktree("remove", "--force", str(worktree_dir))
+    except git.exc.GitCommandError:
+        pass  # not a registered worktree (never created, or already removed)
+    try:
+        repo.git.worktree("prune")
+    except git.exc.GitCommandError:
+        pass
+    # A leftover plain directory (not a registered worktree) won't be touched above.
+    if worktree_dir.exists():
+        shutil.rmtree(worktree_dir, ignore_errors=True)
+
 
 def _get_or_add_remote(repo: git.Repo, remote_url: str, preferred_name: str) -> str:
     """Return the name of an existing remote with matching URL, or add one."""

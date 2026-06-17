@@ -25,7 +25,9 @@ Create a new codeforge project named $ARGUMENTS.
        default_branch: "main"
        branch_prefix: "codeforge/"
        pr_target: "main"
-       auto_merge: true
+       auto_merge: false      # local main is canonical and accumulates by fast-forward;
+                              # the PR is for review. Enable only if you want the remote
+                              # to auto-squash-merge (diverges remote history from local).
        output_dir: "src"
 
    test_runner:
@@ -42,7 +44,13 @@ Create a new codeforge project named $ARGUMENTS.
    run-logs/
    .envrc
 
-5. Run git init in /home/sabbamonte/projects/$ARGUMENTS/codeforge-state/
+5. Initialise the codeforge-state repo on a `main` branch with a base commit so `main`
+   always exists (codeforge requires it; an unborn HEAD is treated as a setup error):
+   - git -C /home/sabbamonte/projects/$ARGUMENTS/codeforge-state/ init -b main
+   - git -C /home/sabbamonte/projects/$ARGUMENTS/codeforge-state/ add .gitignore
+   - git -C /home/sabbamonte/projects/$ARGUMENTS/codeforge-state/ commit -m "chore: initialize repository"
+     (commits the .gitignore from step 4; if git complains about identity, set a local
+     user.name/user.email on the repo first)
 
 6. Create a .venv in /home/sabbamonte/projects/$ARGUMENTS/source/ using python3.12 -m venv .venv
 
@@ -52,12 +60,18 @@ Create a new codeforge project named $ARGUMENTS.
    .venv/
    .envrc
 
-8. Run git init in /home/sabbamonte/projects/$ARGUMENTS/source/
+8. Initialise the source repo on a `main` branch with a base commit, the same way. This
+   is the immutable base every run's feature branch is created from; the canonical
+   checkout must rest on `main` between runs:
+   - git -C /home/sabbamonte/projects/$ARGUMENTS/source/ init -b main
+   - git -C /home/sabbamonte/projects/$ARGUMENTS/source/ add .gitignore
+   - git -C /home/sabbamonte/projects/$ARGUMENTS/source/ commit -m "chore: initialize repository"
+     (commits the .gitignore from step 7; set a local user.name/user.email first if needed)
 
 Print a confirmation summary:
 ✓ State repo:   /home/sabbamonte/projects/$ARGUMENTS/codeforge-state/
 ✓ Source repo:  /home/sabbamonte/projects/$ARGUMENTS/source/
-✓ git init complete in both repos
+✓ Both repos initialised on `main` with a base commit (required by codeforge)
 ✓ .venv created in source repo (python3.12)
 ✓ Config pre-filled: source path + sandbox_image (python:3.12-slim)
 ✓ .envrc created at project root (.gitignore'd in both repos)
