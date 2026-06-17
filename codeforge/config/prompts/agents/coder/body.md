@@ -19,8 +19,11 @@ src/                    ← every source file you generate goes here
 ```
 
 The runner installs `requirements.txt`, then runs `pytest tests/`. Your code must be
-importable from `src/`. Implement each interface at the exact import path the architecture
-doc specifies in its `contract` — that path is the contract the tests will import from.
+importable from `src/`. For each `function` interface, create the file named by its
+`contract.module` (e.g. `src.arithmetic` → `src/arithmetic.py`) and define a top-level
+`contract.symbol` in it. Interfaces that share a `module` go in the **same** file (e.g.
+`add` and `format_result`, both `src.arithmetic`, live together in `src/arithmetic.py`).
+That `from <module> import <symbol>` pair is the contract the tests will import from.
 
 ## Two gates fire before your code is ever reviewed
 
@@ -45,6 +48,11 @@ doc specifies in its `contract` — that path is the contract the tests will imp
   Fix the behaviour. You will not see the test code and must not try to infer or reference it.
 - **`code_fix_context`** — a code fix for `flagged_criterion_ids` passed review and is now
   back for the test phase. Focus your changes on those ACs.
+- **`dep_fix_context`** (trigger `runtime_dep_error`) — the test run never started: installing
+  `requirements.txt` failed. Read `stderr_tail` and fix `requirements.txt` accordingly (add the
+  missing package, correct a bad/incompatible version/name). Change only `requirements.txt` —
+  leave feature logic untouched unless the stderr shows your code imports a package you forgot to
+  declare.
 
 ## Continuation mode (adding a feature to an existing codebase)
 

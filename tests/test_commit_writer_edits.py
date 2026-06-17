@@ -29,7 +29,7 @@ def test_modified_file_is_patched_in_place(tmp_path: Path) -> None:
 
     artifact = _artifact([
         CodeFile(
-            path="calc.py",
+            path="src/calc.py",
             content="",
             language="python",
             change_type="modified",
@@ -40,7 +40,7 @@ def test_modified_file_is_patched_in_place(tmp_path: Path) -> None:
         )
     ])
 
-    _write_code_artifact(tmp_path, artifact, "src")
+    _write_code_artifact(tmp_path, artifact)
 
     result = (src / "calc.py").read_text()
     assert "def add(a, b):" in result          # untouched
@@ -51,7 +51,7 @@ def test_modified_file_is_patched_in_place(tmp_path: Path) -> None:
 def test_modified_missing_file_raises(tmp_path: Path) -> None:
     artifact = _artifact([
         CodeFile(
-            path="ghost.py",
+            path="src/ghost.py",
             content="",
             language="python",
             change_type="modified",
@@ -59,12 +59,12 @@ def test_modified_missing_file_raises(tmp_path: Path) -> None:
         )
     ])
     with pytest.raises(EditError, match="missing file"):
-        _write_code_artifact(tmp_path, artifact, "src")
+        _write_code_artifact(tmp_path, artifact)
 
 
 def test_new_file_written_whole(tmp_path: Path) -> None:
     artifact = _artifact([
-        CodeFile(path="new.py", content="print('hi')\n", language="python", change_type="new")
+        CodeFile(path="src/new.py", content="print('hi')\n", language="python", change_type="new")
     ])
-    _write_code_artifact(tmp_path, artifact, "src")
+    _write_code_artifact(tmp_path, artifact)
     assert (tmp_path / "src" / "new.py").read_text() == "print('hi')\n"

@@ -76,6 +76,10 @@ def _type_label(schema: dict[str, Any], defs: dict[str, Any]) -> str:
         return repr(schema["const"])
     t = schema.get("type")
     if t == "array":
+        # Fixed-length tuples (e.g. tuple[int, int]) use prefixItems, not items.
+        prefix = schema.get("prefixItems")
+        if prefix:
+            return "[" + ", ".join(_type_label(s, defs) for s in prefix) + "]"
         return f"{_type_label(schema.get('items', {}), defs)}[]"
     if t == "null":
         return "null"

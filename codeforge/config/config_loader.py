@@ -35,6 +35,9 @@ class RetryLimitsConfig(BaseModel):
     coder_validation_retries: int = 2
     architecture_validation_retries: int = 2
     infrastructure_retries: int = 3
+    environment_repair: int = 2
+    dependency_repair: int = 2
+    low_confidence_reprompt: int = 1
     malformed_output_retries: int = 2
     codeforge_state_commit: int = 3
     source_code_commit: int = 3

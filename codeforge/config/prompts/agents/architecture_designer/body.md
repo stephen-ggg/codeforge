@@ -56,17 +56,24 @@ should you transcribe the result into the output object.
 `interfaces[].contract` is a free-form object, but it must be specific enough to test
 against blind. Populate it according to `kind`:
 
-- **`function`** — fully-qualified import path (e.g. `src.even_sum.sum_even`), the signature,
-  each parameter name and type, the return type, and any exceptions raised under which
-  conditions.
+- **`function`** — two separate fields that locate the symbol unambiguously, plus the
+  signature, each parameter name and type, the return type, and any exceptions raised under
+  which conditions:
+  - `module` — the dotted path of the importable module (e.g. `src.arithmetic`).
+  - `symbol` — the exact top-level name defined in that module (e.g. `add`).
+
+  Several symbols may share one `module` (e.g. `add` and `format_result` both in
+  `src.arithmetic`), so `module` + `.` + `symbol` is **not** itself a module path — never
+  collapse the two into a single dotted string.
 - **`http_endpoint`** — method, path, request body/query schema, response body schema, and
   the status codes returned for success and each error case.
 - **`db_schema`** — table/collection name, each field with type and constraints, and keys.
 - **`event` / `queue_message`** — the message name, its payload schema, and who publishes
   and consumes it.
 
-The import path you specify for a `function` interface is the contract the Coder must
-implement to and the Test Designer will import from. Make it concrete.
+The `module`/`symbol` pair you specify for a `function` interface is the contract the Coder
+must implement to (a file at `module` defining a top-level `symbol`) and the Test Designer
+will import from (`from <module> import <symbol>`). Make both concrete.
 
 ## The criteria_coverage gate
 

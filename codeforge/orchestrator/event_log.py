@@ -181,6 +181,7 @@ class EventLog(EventLogProtocol):
         counters: CountersSnapshot,
         counter_deltas: dict[str, int] | None = None,
         counter_resets: list[str] | None = None,
+        detail: str = "",
     ) -> None:
         event = RoutingEvent(
             **self._base_fields(counters),
@@ -190,6 +191,7 @@ class EventLog(EventLogProtocol):
             counter_deltas=counter_deltas or {},
             counter_resets=counter_resets or [],
             next_state=next_state,
+            detail=detail,
         )
         self.emit(event)
 

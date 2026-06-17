@@ -27,6 +27,7 @@ class CoderAgent(BaseAgent):
       - existing_interfaces (injected by orchestrator from feature_registry)
       - retry_context (injected by orchestrator on review failure)
       - code_fix_context (injected by orchestrator on fail_code_bug re-entry)
+      - dep_fix_context (injected on runtime-dependency error auto-recovery re-entry)
     """
 
     def build_user_turn(
@@ -53,6 +54,7 @@ class CoderAgent(BaseAgent):
             "existing_interfaces": json.loads(state.get("_existing_interfaces", "[]")),
             "retry_context": json.loads(state.get("_retry_context", "null")),
             "code_fix_context": json.loads(state.get("_code_fix_context", "null")),
+            "dep_fix_context": json.loads(state.get("_dep_fix_context", "null")),
         }
 
         if reprompt is not None:

@@ -32,7 +32,7 @@ from codeforge.cli.interaction import HumanInteraction
 from codeforge.cli.lock import CodeforgeAlreadyRunningError, CodeforgeLock
 from codeforge.config.config_loader import load_config
 from codeforge.orchestrator.state_machine import EscalationError, StateMachine
-from codeforge.schemas.contracts import CommitWriterInput
+from codeforge.schemas.contracts import CodeforgeRun, CommitWriterInput, EscalationEvent
 
 app = typer.Typer(
     name="codeforge",
@@ -98,6 +98,35 @@ def _load_codeforge_run(run_log_dir: Path, run_id: str) -> dict[str, Any]:
     return result
 
 
+def _select_resume_escalation(
+    run: "CodeforgeRun",
+) -> "tuple[EscalationEvent | None, bool]":
+    """Pick the escalation that resume should act on, and whether to prompt.
+
+    Returns (escalation, needs_prompt):
+      - latest escalation unresolved -> (escalation, True)   # prompt the operator
+      - latest escalation resolved   -> (escalation, False)  # silent re-entry
+      - no escalations               -> (None, False)        # default reentry
+
+    The *latest* escalation is the relevant one whether or not it is resolved: when
+    a prior resume crashed after recording the resolution, the escalation is left
+    resolved on disk and we re-enter silently using its stored reentry_directive.
+    A rejected escalation is never marked resolved (rejection aborts before that),
+    so it remains unresolved and re-prompts on the next resume.
+    """
+    if not run.escalations:
+        return None, False
+    latest = run.escalations[-1]
+    return latest, (not latest.resolved)
+
+
+def _initial_state_from(escalation: "EscalationEvent | None") -> str:
+    """Reentry state for resume: the escalation's reentry_directive, else requirements."""
+    if escalation and escalation.resolution and escalation.resolution.reentry_directive:
+        return escalation.resolution.reentry_directive.reentry_state
+    return "requirements"
+
+
 def _do_commit(
     sm: StateMachine,
     req_doc: Any,
@@ -132,7 +161,9 @@ def _do_commit(
         outcome = route_commit_state_fail(run.retry_counters, config.to_dict())
         sm._apply_outcome(outcome)  # increments counter + emits routing event
         if outcome.decision == "escalate":
-            raise EscalationError(
+            # Record the escalation (status=failed_escalated, suggested_reentry_state
+            # =commit) so the run stays resumable, then raise EscalationError.
+            sm._escalate(
                 "commit_failure",
                 f"State commit failed after retries: {state_result.error_message}",
             )
@@ -165,7 +196,7 @@ def _do_commit(
         outcome = route_commit_src_fail(run.retry_counters, config.to_dict())
         sm._apply_outcome(outcome)
         if outcome.decision == "escalate":
-            raise EscalationError(
+            sm._escalate(
                 "commit_failure",
                 f"Source commit failed after retries: {src_result.error_message}",
             )
@@ -174,6 +205,11 @@ def _do_commit(
         )
 
     sm._apply_outcome(route_commit_success())
+
+    # The git commit has now landed — promote the run to succeeded. run_commit()
+    # deliberately leaves status untouched so a commit failure stays resumable.
+    run.status = "succeeded"
+    sm.event_log.update_run_snapshot(run)
 
 
 # ---------------------------------------------------------------------------
@@ -333,14 +369,20 @@ def resume(
     sm = StateMachine(config, project_dir, run_log_dir)
 
     try:
-        from codeforge.schemas.contracts import CodeforgeRun
-
         codeforge_run = CodeforgeRun(**run_data)
 
-        # Surface the most recent unresolved escalation so the operator can decide
-        unresolved = [e for e in codeforge_run.escalations if not e.resolved]
-        if unresolved:
-            escalation = unresolved[-1]
+        # Nothing to resume on a completed run.
+        if codeforge_run.status == "succeeded":
+            typer.echo(f"Run {run_id} already succeeded — nothing to resume.")
+            raise typer.Exit(0)
+
+        # Pick the escalation to act on. Prompt only for a still-unresolved one;
+        # an already-resolved escalation (e.g. a prior resume that crashed after
+        # recording the resolution) is re-entered silently using its stored
+        # reentry_directive.
+        escalation, needs_prompt = _select_resume_escalation(codeforge_run)
+        freshly_resolved = False
+        if escalation is not None and needs_prompt:
             typer.echo(f"\nResuming run {run_id} — pending escalation:")
             resolution = human.handle_escalation(escalation)
 
@@ -348,15 +390,29 @@ def resume(
                 typer.echo("Escalation rejected — aborting run.", err=True)
                 raise typer.Exit(2)
 
+            from datetime import datetime, timezone
             escalation.resolved = True
             escalation.resolution = resolution
+            escalation.resolved_at = datetime.now(timezone.utc).isoformat()
+            freshly_resolved = True
+        elif escalation is not None:
+            typer.echo(
+                f"Re-entering run {run_id} at previously resolved escalation "
+                f"(reentry state: {_initial_state_from(escalation)})."
+            )
         else:
-            typer.echo(f"Resuming run {run_id} (no pending escalation).")
+            typer.echo(f"Resuming run {run_id} (no recorded escalation).")
 
         sm.resume_run(codeforge_run)
 
-        # Write human_override entry when the operator modified the run
-        if unresolved and escalation.resolution and escalation.resolution.outcome == "modified":
+        # Write human_override entry only when the operator just modified the run.
+        # Gated on freshly_resolved so re-resumes don't duplicate the entry.
+        if (
+            freshly_resolved
+            and escalation is not None
+            and escalation.resolution
+            and escalation.resolution.outcome == "modified"
+        ):
             import uuid as _uuid
             from datetime import datetime, timezone
             sm.pending.merge_append("decisions_log", [{
@@ -369,9 +425,13 @@ def resume(
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }])
 
-        # Apply counter resets from the operator's resolution directive (if any)
+        # Apply the resolution's reentry directive (if any). This runs for both a
+        # freshly-resolved and a previously-resolved escalation so re-resumes land
+        # at the same reentry state. counter_resets reset to 0 (idempotent); a
+        # reset_global_ceiling re-zeroes agent_call_count, which is acceptable
+        # because this path only runs when a prior resume did not complete.
         initial_state = "requirements"
-        if unresolved and escalation.resolution and escalation.resolution.reentry_directive:
+        if escalation and escalation.resolution and escalation.resolution.reentry_directive:
             directive = escalation.resolution.reentry_directive
             initial_state = directive.reentry_state
             from codeforge.orchestrator.routing import RoutingOutcome as _RO
@@ -394,6 +454,11 @@ def resume(
         typer.echo(f"Codeforge succeeded (run {run_id})")
 
         _do_commit(sm, req_doc, code_art, test_suite, config, project_dir)
+
+    except typer.Exit:
+        # Deliberate exits (rejection, succeeded guard) must propagate with their
+        # own code and must not be treated as a terminal failure.
+        raise
 
     except EscalationError as exc:
         typer.echo(f"\nCodeforge escalated again: {exc.reason}", err=True)

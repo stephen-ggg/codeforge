@@ -19,7 +19,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.firewall.assembler import ContextAssembler, ContextPackage
@@ -27,7 +27,7 @@ from codeforge.firewall.manifest import FirewallManifest, load_manifest
 from codeforge.model_router.router import ModelRouter
 from codeforge.tools.executor import ToolExecutor
 from codeforge.orchestrator.event_log import EventLog
-from codeforge.orchestrator.gates import GateEvaluator
+from codeforge.orchestrator.gates import GateEvaluator, GateResult
 from codeforge.orchestrator.pending_writes import PendingWrites
 from codeforge.orchestrator.routing import (
     RoutingOutcome,
@@ -35,7 +35,9 @@ from codeforge.orchestrator.routing import (
     route_malformed,
     route_block_flag,
     route_ceiling_exceeded,
+    route_output_truncated,
     route_low_confidence,
+    route_low_confidence_reprompt,
     route_requirements_clarify,
     route_requirements_complete,
     route_requirements_confirmed,
@@ -59,13 +61,18 @@ from codeforge.orchestrator.routing import (
     route_test_analysis_spec_gap,
     route_test_analysis_ambiguous,
     route_test_analysis_error,
+    route_test_analysis_recoverable_error,
 )
 from codeforge.orchestrator.state_writer import flush_pending_writes
 from codeforge.schemas.contracts import (
     AgentId,
+    AgentOutput,
+    ArchitectureDesignerOutput,
     ArtifactRef,
     ArtifactType,
     CodeArtifact,
+    CodeReviewerOutput,
+    CoderOutput,
     CodeforgeRun,
     CodeforgeStatus,
     CountersSnapshot,
@@ -73,13 +80,18 @@ from codeforge.schemas.contracts import (
     EscalationReason,
     HandoffInvocationType,
     LogActor,
+    LowConfidenceRePrompt,
+    ReentryState,
     RePromptContext,
     RequirementsDoc,
     RetryCounters,
     ReviewReport,
     SecurityReport,
+    SecurityReviewerOutput,
     TestAnalysis,
+    TestAnalystOutput,
     ArchitectureDoc,
+    TestDesignerOutput,
     TestSuite,
 )
 from codeforge.schemas.validation import OutputValidator
@@ -121,7 +133,9 @@ class StateMachine:
         self._project_dir = project_dir
         self._run_log_dir = run_log_dir
 
-        # Stores
+        # Stores. The artifact store is re-rooted at the per-run directory
+        # (run-logs/<run_id>/) in start_run/resume_run once the run_id is known — this
+        # base-rooted instance is a placeholder that is never written to.
         self._project_state = ProjectStateStore(project_dir)
         self._artifact_store = ArtifactStore(run_log_dir)
 
@@ -155,6 +169,8 @@ class StateMachine:
         run_id = _new_run_id()
         run_log_dir = self._run_log_dir / run_id
         run_log_dir.mkdir(parents=True, exist_ok=True)
+        # Root all artifact I/O (validated / failed / raw) under this run's directory.
+        self._artifact_store = ArtifactStore(run_log_dir)
 
         from typing import Literal as Lit
         run_mode_typed = cast(Lit["new_project", "continuation"], run_mode)
@@ -192,6 +208,7 @@ class StateMachine:
         """Restore state from a persisted CodeforgeRun (codeforge resume command)."""
         self._run = run
         run_log_dir = self._run_log_dir / run.run_id
+        self._artifact_store = ArtifactStore(run_log_dir)
         self._pending = PendingWrites(self._project_state)
         self._event_log = EventLog(run_log_dir, run.run_id, self._config.name)
         self._validator = OutputValidator(self._config.to_dict())
@@ -268,10 +285,11 @@ class StateMachine:
             counters=self._counters_snap(),
             counter_deltas=outcome.counter_deltas,
             counter_resets=outcome.counter_resets,
+            detail=outcome.detail,
         )
         self.event_log.update_run_snapshot(self.run)
 
-    def _escalate(self, reason: EscalationReason, context: str = "") -> None:
+    def _escalate(self, reason: EscalationReason, context: str = "") -> NoReturn:
         """Record escalation, update run status, raise EscalationError."""
         event = EscalationEvent(
             escalation_id=str(uuid.uuid4()),
@@ -382,6 +400,26 @@ class StateMachine:
             litellm_call_id=result.litellm_call_id,
         )
 
+        # Truncated output (finish_reason == "length") is terminal: it can't be parsed,
+        # and a re-prompt would re-truncate at the same max_tokens. Persist the partial
+        # response for debugging, emit a self-sufficient gate event, and escalate with a
+        # clear reason rather than letting it masquerade as a generic malformed_output.
+        if result.truncated:
+            artifact_id = self._artifact_store.write_raw(result.content, produced_by=agent_id)
+            self.event_log.emit_gate(
+                rule="schema_valid",
+                passed=False,
+                source_agent=typed_actor,
+                counters=self._counters_snap(),
+                detail=(
+                    "output truncated at max_tokens (finish_reason=length) — raise the "
+                    f"agent's max_tokens or reduce the unit of work for '{agent_id}'"
+                ),
+                artifact_ref=artifact_id,
+            )
+            self._apply_outcome(route_output_truncated())
+            self._escalate("output_truncated", context=artifact_id)
+
         return result.content
 
     def _store_artifact(
@@ -417,6 +455,166 @@ class StateMachine:
             content_hash=meta.content_hash,
             schema_version=meta.schema_version,
         )
+
+    # ------------------------------------------------------------------
+    # Policy gate failure handling (block flag / low confidence)
+    # ------------------------------------------------------------------
+
+    def _handle_policy_escalation(
+        self,
+        gate_result: GateResult,
+        agent_id: str,
+        artifact_type: str,
+        low_confidence_outcome: RoutingOutcome,
+    ) -> RePromptContext:
+        """
+        Handle a terminal policy gate failure for an agent phase.
+
+        - block_flag → always terminal: persist the output + emit a linked failing gate +
+          escalate (raises).
+        - low_confidence → one re-prompt (a 'be more thorough' nudge) before escalating.
+          While in budget, returns a LowConfidenceRePrompt for the caller to re-prompt with
+          (no artifact persisted — it's not terminal). Once exhausted, behaves like block_flag.
+
+        On every terminal path the output is written to the ISOLATED failed-artifacts area
+        (never artifacts/) so it can't leak into get_latest/exists; the only links to it are
+        the gate event's artifact_ref and the escalation's agent_output_ref. This method
+        returns only on the re-prompt path; all terminal paths raise EscalationError.
+        """
+        output = gate_result.parsed_output
+        assert output is not None  # always set by GateEvaluator on a policy failure
+
+        # Low confidence: try one re-prompt before escalating.
+        if gate_result.escalation_reason == "low_confidence":
+            cfg = self._config.to_dict()
+            reprompt_outcome = route_low_confidence_reprompt(
+                agent_id, self.run.retry_counters, cfg
+            )
+            if reprompt_outcome.decision == "re_prompt_same_agent":
+                threshold = float(cfg.get("confidence_thresholds", {}).get(agent_id, 0.0))
+                limit = int(cfg.get("retry_limits", {}).get("low_confidence_reprompt", 1))
+                attempt = self.run.retry_counters.low_confidence_reprompt + 1
+                reprompt_outcome.detail = (
+                    f"prior_confidence={output.confidence} threshold={threshold} "
+                    f"(re-prompt {attempt}/{limit})"
+                )
+                # Log the gate failure + the fact that we're re-prompting (not persisted —
+                # this output is not terminal).
+                self.event_log.emit_gate(
+                    rule=gate_result.policy_gate_rule,  # type: ignore[arg-type]
+                    passed=False,
+                    source_agent=cast(LogActor, agent_id),
+                    counters=self._counters_snap(),
+                    detail=self._format_policy_detail(gate_result, output) + " | re-prompting",
+                )
+                self._apply_outcome(reprompt_outcome)
+                return LowConfidenceRePrompt(
+                    prior_confidence=output.confidence,
+                    threshold=threshold,
+                    attempt_number=attempt,
+                    max_attempts=limit,
+                )
+            # budget exhausted → fall through to terminal escalation below
+
+        # Terminal: persist the offending output, emit a linked failing gate, escalate.
+        artifact_id = self._write_failed_artifact(artifact_type, agent_id, output)
+        self.event_log.emit_gate(
+            rule=gate_result.policy_gate_rule,  # type: ignore[arg-type]
+            passed=False,
+            source_agent=cast(LogActor, agent_id),
+            counters=self._counters_snap(),
+            detail=self._format_policy_detail(gate_result, output),
+            artifact_ref=artifact_id,
+        )
+
+        if gate_result.escalation_reason == "block_flag":
+            self._apply_outcome(route_block_flag())
+            self._escalate("block_flag", context=artifact_id)
+        self._apply_outcome(low_confidence_outcome)
+        self._escalate("low_confidence", context=artifact_id)
+
+    def _write_failed_artifact(
+        self,
+        artifact_type: str,
+        agent_id: str,
+        output: Any,
+    ) -> str:
+        """Write a blocked/low-confidence output to failed_artifacts/ and return its id."""
+        typed_artifact_type = cast(ArtifactType, artifact_type)
+        typed_agent_id = cast(AgentId, agent_id)
+
+        manifest = load_manifest()
+        access = manifest.get_artifact_access(typed_artifact_type)
+        allowed = list(access.allowed_consumers if access else [])
+        forbidden = list(access.forbidden_consumers if access else [])
+
+        meta = self._artifact_store.write_failed(
+            artifact_type=typed_artifact_type,
+            produced_by=typed_agent_id,
+            output=output,
+            run_id=self.run.run_id,
+            codeforge_version=self._config.name,
+            schema_version="1.0.0",
+            allowed_consumers=allowed,
+            forbidden_consumers=forbidden,
+        )
+        return meta.artifact_id
+
+    def _handle_structural_failure(
+        self,
+        raw: str,
+        agent_id: str,
+        gate_result: GateResult,
+    ) -> RePromptContext | None:
+        """
+        Handle a structural (malformed) or contract gate failure: route_malformed
+        decides re-prompt vs escalate.
+
+        On the terminal (budget-exhausted) path the raw LLM response — which failed
+        validation and would otherwise be dropped — is persisted to the ISOLATED
+        raw_outputs/ area and linked from the escalation's agent_output_ref so the
+        offending output is debuggable. Returns the re-prompt context on the re-prompt
+        path; raises EscalationError on the terminal path.
+        """
+        reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
+        outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), agent_id)
+        self._apply_outcome(outcome)
+        if outcome.decision == "escalate":
+            artifact_id = self._artifact_store.write_raw(raw, produced_by=agent_id)
+            self._escalate(
+                outcome.escalation_reason or "malformed_output", context=artifact_id
+            )
+        return reprompt
+
+    def _format_policy_detail(self, gate_result: GateResult, output: Any) -> str:
+        """
+        Build a self-sufficient gate detail string so the events.jsonl line alone is
+        enough to diagnose the escalation: the flag reason(s) and the problem summary.
+        """
+        parts = [f"escalation_reason={gate_result.escalation_reason}"]
+
+        if gate_result.escalation_reason == "block_flag":
+            for flag in output.unresolved_flags:
+                if flag.severity != "block":
+                    continue
+                seg = f"flag={flag.id}: {flag.description}"
+                if flag.suggested_action:
+                    seg += f" (suggested: {flag.suggested_action})"
+                parts.append(seg)
+        else:
+            parts.append(f"confidence={output.confidence}")
+
+        payload = output.output
+        summary = (
+            payload.get("summary") if isinstance(payload, dict)
+            else getattr(payload, "summary", None)
+        )
+        if isinstance(summary, str) and summary:
+            if len(summary) > 300:
+                summary = summary[:297] + "..."
+            parts.append(f"summary={summary}")
+
+        return " | ".join(parts)
 
     def _record_assumptions(self, output: Any, agent_id: AgentId) -> None:
         """Append recordable assumptions from agent output to assumptions_log."""
@@ -454,7 +652,6 @@ class StateMachine:
         """
         self._current_phase = "requirements_clarification"
         from codeforge.agents.requirements_analyst import RequirementsAnalystAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         clarification_history: list[dict[str, Any]] = []
         confirm_rejection: dict[str, str] | None = None
@@ -492,21 +689,17 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed:
-                reprompt = gate_result.malformed_reprompt
-                outcome = route_malformed(
-                    self.run.retry_counters, self._config.to_dict(), "requirements_analyst"
+                reprompt = self._handle_structural_failure(
+                    raw, "requirements_analyst", gate_result
                 )
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("requirements_analyst"))
-                self._escalate("low_confidence")
+                reprompt = self._handle_policy_escalation(
+                    gate_result, "requirements_analyst", "requirements_doc",
+                    route_low_confidence("requirements_analyst"),
+                )
+                continue
 
             # Parse output
             data = json.loads(raw)
@@ -566,7 +759,7 @@ class StateMachine:
         """Drive architecture design to completion."""
         self._current_phase = "architecture"
         from codeforge.agents.architecture_designer import ArchitectureDesignerAgent
-        from codeforge.schemas.contracts import AgentOutput, InterfaceManifest
+        from codeforge.schemas.contracts import InterfaceManifest
 
         reprompt: RePromptContext | None = None
 
@@ -592,7 +785,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=ArchitectureDesignerOutput,
                 agent_id="architecture_designer",
                 attempt_number=self.run.retry_counters.architecture_validation,
                 assembly_id=pkg.assembly_id,
@@ -602,13 +795,9 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed:
-                reprompt = gate_result.malformed_reprompt
-                outcome = route_malformed(
-                    self.run.retry_counters, self._config.to_dict(), "architecture_designer"
+                reprompt = self._handle_structural_failure(
+                    raw, "architecture_designer", gate_result
                 )
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
                 continue
 
             if not gate_result.contract_passed:
@@ -620,15 +809,14 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_architecture_lowconf())
-                self._escalate("low_confidence")
+                reprompt = self._handle_policy_escalation(
+                    gate_result, "architecture_designer", "architecture_doc",
+                    route_architecture_lowconf(),
+                )
+                continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            arch_doc = ArchitectureDoc(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            arch_doc = cast(ArchitectureDoc, output.output)
 
             # Check for locked tech decisions
             locked = [d for d in arch_doc.tech_decisions if d.locked]
@@ -698,11 +886,11 @@ class StateMachine:
         retry_context: dict[str, Any] | None = None,
         code_fix_context: dict[str, Any] | None = None,
         entry_stripped_fields: list[str] | None = None,
+        dep_fix_context: dict[str, Any] | None = None,
     ) -> CodeArtifact:
         """Drive coding to completion."""
         self._current_phase = "coding"
         from codeforge.agents.coder import CoderAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
         first_call = True
@@ -715,6 +903,7 @@ class StateMachine:
             pkg.state_documents["_existing_interfaces"] = json.dumps([])
             pkg.state_documents["_retry_context"] = json.dumps(retry_context)
             pkg.state_documents["_code_fix_context"] = json.dumps(code_fix_context)
+            pkg.state_documents["_dep_fix_context"] = json.dumps(dep_fix_context)
 
             user_turn = CoderAgent(
                 "coder", self.router, self._config
@@ -733,7 +922,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=CoderOutput,
                 agent_id="coder",
                 attempt_number=self.run.retry_counters.coder_validation,
                 assembly_id=pkg.assembly_id,
@@ -743,11 +932,7 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed:
-                reprompt = gate_result.malformed_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "coder")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "coder", gate_result)
                 continue
 
             if not gate_result.contract_passed:
@@ -763,15 +948,14 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("coder"))
-                self._escalate("low_confidence")
+                reprompt = self._handle_policy_escalation(
+                    gate_result, "coder", "code_artifact",
+                    route_low_confidence("coder"),
+                )
+                continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            code_artifact = CodeArtifact(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            code_artifact = cast(CodeArtifact, output.output)
 
             outcome = route_coding_valid()
             self._apply_outcome(outcome)
@@ -795,7 +979,6 @@ class StateMachine:
         """Drive code review to completion. Returns passing ReviewReport."""
         self._current_phase = "code_review"
         from codeforge.agents.code_reviewer import CodeReviewerAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
 
@@ -815,7 +998,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=CodeReviewerOutput,
                 agent_id="code_reviewer",
                 attempt_number=self.run.retry_counters.malformed_output,
                 assembly_id=pkg.assembly_id,
@@ -824,23 +1007,18 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed or not gate_result.contract_passed:
-                reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "code_reviewer")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "code_reviewer", gate_result)
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("code_reviewer"))
-                self._escalate("low_confidence")
+                reprompt = self._handle_policy_escalation(
+                    gate_result, "code_reviewer", "review_report",
+                    route_low_confidence("code_reviewer"),
+                )
+                continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            report = ReviewReport(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            report = cast(ReviewReport, output.output)
 
             if report.verdict == "fail":
                 outcome = route_code_review_fail(self.run.retry_counters, self._config.to_dict())
@@ -878,7 +1056,6 @@ class StateMachine:
         """Drive security review to completion. Returns passing SecurityReport."""
         self._current_phase = "code_review"
         from codeforge.agents.security_reviewer import SecurityReviewerAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
 
@@ -898,7 +1075,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=SecurityReviewerOutput,
                 agent_id="security_reviewer",
                 attempt_number=self.run.retry_counters.malformed_output,
                 assembly_id=pkg.assembly_id,
@@ -907,23 +1084,18 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed or not gate_result.contract_passed:
-                reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "security_reviewer")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "security_reviewer", gate_result)
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("security_reviewer"))
-                self._escalate("low_confidence")
+                reprompt = self._handle_policy_escalation(
+                    gate_result, "security_reviewer", "security_report",
+                    route_low_confidence("security_reviewer"),
+                )
+                continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            report = SecurityReport(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            report = cast(SecurityReport, output.output)
 
             if report.verdict == "fail":
                 outcome = route_security_review_fail(self.run.retry_counters, self._config.to_dict())
@@ -958,11 +1130,11 @@ class StateMachine:
         system_prompt: str,
         code_fix_context: dict[str, Any] | None = None,
         retry_context: dict[str, Any] | None = None,
+        env_fix_context: dict[str, Any] | None = None,
     ) -> TestSuite:
         """Drive test design to completion."""
         self._current_phase = "test_design"
         from codeforge.agents.test_designer import TestDesignerAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
 
@@ -979,6 +1151,7 @@ class StateMachine:
             # Inject orchestrator-managed fields for build_user_turn()
             pkg.state_documents["_code_fix_context"] = json.dumps(code_fix_context)
             pkg.state_documents["_retry_context"] = json.dumps(retry_context)
+            pkg.state_documents["_env_fix_context"] = json.dumps(env_fix_context)
 
             user_turn = TestDesignerAgent(
                 "test_designer", self.router, self._config
@@ -992,7 +1165,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=TestDesignerOutput,
                 agent_id="test_designer",
                 attempt_number=self.run.retry_counters.test_loop,
                 assembly_id=pkg.assembly_id,
@@ -1002,11 +1175,7 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed:
-                reprompt = gate_result.malformed_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "test_designer")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "test_designer", gate_result)
                 continue
 
             if not gate_result.contract_passed:
@@ -1018,15 +1187,14 @@ class StateMachine:
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("test_designer"))
-                self._escalate("low_confidence")
+                reprompt = self._handle_policy_escalation(
+                    gate_result, "test_designer", "test_suite",
+                    route_low_confidence("test_designer"),
+                )
+                continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            test_suite = TestSuite(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            test_suite = cast(TestSuite, output.output)
 
             ref = self._store_artifact("test_suite", "test_designer", output)
             self.run.artifacts["test_suite"] = ref
@@ -1051,7 +1219,6 @@ class StateMachine:
         """Drive test analysis to completion."""
         self._current_phase = "test_execution"
         from codeforge.agents.test_analyst import TestAnalystAgent
-        from codeforge.schemas.contracts import AgentOutput
 
         reprompt: RePromptContext | None = None
 
@@ -1073,7 +1240,7 @@ class StateMachine:
 
             gate_result = self.gates.evaluate(
                 raw=raw,
-                expected_model=AgentOutput,
+                expected_model=TestAnalystOutput,
                 agent_id="test_analyst",
                 attempt_number=self.run.retry_counters.malformed_output,
                 assembly_id=pkg.assembly_id,
@@ -1082,23 +1249,18 @@ class StateMachine:
             )
 
             if not gate_result.structural_passed or not gate_result.contract_passed:
-                reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
-                outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), "test_analyst")
-                self._apply_outcome(outcome)
-                if outcome.decision == "escalate":
-                    self._escalate(outcome.escalation_reason or "malformed_output")
+                reprompt = self._handle_structural_failure(raw, "test_analyst", gate_result)
                 continue
 
             if not gate_result.policy_passed:
-                if gate_result.escalation_reason == "block_flag":
-                    self._apply_outcome(route_block_flag())
-                    self._escalate("block_flag")
-                self._apply_outcome(route_low_confidence("test_analyst"))
-                self._escalate("low_confidence")
+                reprompt = self._handle_policy_escalation(
+                    gate_result, "test_analyst", "test_analysis",
+                    route_low_confidence("test_analyst"),
+                )
+                continue
 
-            data = json.loads(raw)
-            output: AgentOutput[Any] = AgentOutput(**data)
-            analysis = TestAnalysis(**output.output)
+            output = cast("AgentOutput[Any]", gate_result.parsed_output)
+            analysis = cast(TestAnalysis, output.output)
 
             ref = self._store_artifact("test_analysis", "test_analyst", output)
             self.run.artifacts["test_analysis"] = ref
@@ -1111,6 +1273,7 @@ class StateMachine:
 
     def run_commit(self) -> None:
         """Flush pending_writes to disk. CommitWriter invocation handled by CLI layer."""
+        self._current_phase = "commit"
         counters = self._counters_snap()
         flush_pending_writes(
             self.pending,
@@ -1119,7 +1282,10 @@ class StateMachine:
             counters,
             run_id=self.run.run_id,
         )
-        self.run.status = "succeeded"
+        # Status is promoted to "succeeded" by the CLI only after the git commit
+        # (_do_commit) actually lands. Marking success here would be premature: a
+        # commit failure must leave the run as failed_escalated and resumable, not
+        # falsely "succeeded".
         self.event_log.update_run_snapshot(self.run)
 
     # ------------------------------------------------------------------
@@ -1183,6 +1349,8 @@ class StateMachine:
 
         spec_gap_context: dict[str, Any] | None = None
         code_fix_context: dict[str, Any] | None = None
+        env_fix_context: dict[str, Any] | None = None
+        dep_fix_context: dict[str, Any] | None = None
         req_doc: RequirementsDoc | None = None
         arch_doc: ArchitectureDoc | None = None
         code_art: CodeArtifact | None = None
@@ -1197,14 +1365,22 @@ class StateMachine:
             req_data = self._load_artifact_output("requirements_doc")
             if req_data is None:
                 raise RuntimeError("Cannot resume: requirements_doc artifact not found")
+            # The requirements_doc artifact stores the analyst envelope
+            # {status, requirements_doc: {...}}; the actual RequirementsDoc fields
+            # are nested one level down (the live run returns the unwrapped doc).
+            if "requirements_doc" in req_data:
+                req_data = req_data["requirements_doc"]
             req_doc = RequirementsDoc(**req_data)
 
-            if initial_state in ("coding", "code_review", "test_design", "test_execution"):
+            if initial_state in ("coding", "code_review", "test_design", "test_execution", "commit"):
                 arch_data = self._load_artifact_output("architecture_doc")
                 if arch_data is not None:
                     arch_doc = ArchitectureDoc(**arch_data)
 
-            if initial_state in ("test_execution",):
+            # "commit" re-entry skips the phase loop (mapped to "done" below) but still
+            # needs code_art + test_suite for run_commit's closing asserts and the CLI's
+            # source-code commit.
+            if initial_state in ("test_execution", "commit"):
                 code_data = self._load_artifact_output("code_artifact")
                 if code_data is not None:
                     code_art = CodeArtifact(**code_data)
@@ -1237,8 +1413,10 @@ class StateMachine:
             elif next_state == "coding":
                 assert arch_doc is not None
                 code_art = self._run_impl_with_reviews(
-                    req_doc, arch_doc, prompts, human_interface, code_fix_context
+                    req_doc, arch_doc, prompts, human_interface, code_fix_context,
+                    dep_fix_context=dep_fix_context,
                 )
+                dep_fix_context = None  # consumed; clear after coding completes
                 next_state = "test_design"
 
             elif next_state == "test_design":
@@ -1246,8 +1424,10 @@ class StateMachine:
                 test_suite = self.run_test_design(
                     req_doc, arch_doc, prompts["test_designer"],
                     code_fix_context=code_fix_context,
+                    env_fix_context=env_fix_context,
                 )
                 code_fix_context = None  # consumed; clear after test design completes
+                env_fix_context = None   # consumed; clear after test design completes
                 next_state = "test_execution"
 
             elif next_state == "test_execution":
@@ -1364,13 +1544,34 @@ class StateMachine:
                     self._escalate(outcome.escalation_reason or "human_required")
 
                 else:  # "error"
-                    outcome = route_test_analysis_error(
-                        self.run.retry_counters, self._config.to_dict()
+                    cfg = self._config.to_dict()
+                    # Auto-recover off the runner's deterministic error_phase: route the
+                    # failure to the agent that owns the fix (coder for runtime deps,
+                    # test_designer for test infra) before re-running / escalating.
+                    error_phase = getattr(runner_results, "error_phase", None)
+                    recovery = route_test_analysis_recoverable_error(
+                        error_phase, self.run.retry_counters, cfg
                     )
-                    self._apply_outcome(outcome)
-                    if outcome.decision == "escalate":
-                        self._escalate(outcome.escalation_reason or "human_required")
-                    next_state = "test_execution"
+                    if recovery is not None:
+                        # Enrich the routing log line with the actual failure text.
+                        stderr_tail = getattr(runner_results, "stderr_tail", "") or ""
+                        if stderr_tail:
+                            recovery.detail = f"{recovery.detail} | {stderr_tail[:200]}"
+                        self._apply_outcome(recovery)
+                        if recovery.decision == "escalate":
+                            self._escalate(recovery.escalation_reason or "human_required")
+                        if recovery.next_state == "coding":
+                            dep_fix_context = _build_dep_fix_context(runner_results)
+                            next_state = "coding"
+                        else:  # test_design
+                            env_fix_context = _build_env_fix_context(analysis)
+                            next_state = "test_design"
+                    else:
+                        outcome = route_test_analysis_error(self.run.retry_counters, cfg)
+                        self._apply_outcome(outcome)
+                        if outcome.decision == "escalate":
+                            self._escalate(outcome.escalation_reason or "human_required")
+                        next_state = "test_execution"
 
         self.run_commit()
         assert code_art is not None
@@ -1384,6 +1585,7 @@ class StateMachine:
         prompts: dict[str, str],
         human_interface: Any,
         code_fix_context: dict[str, Any] | None = None,
+        dep_fix_context: dict[str, Any] | None = None,
     ) -> CodeArtifact:
         """Inner loop: coder → code review → security review. Retries on review failure."""
         retry_context: dict[str, Any] | None = None
@@ -1393,8 +1595,10 @@ class StateMachine:
             code_art = self.run_coding(
                 req_doc, arch_doc, prompts["coder"], retry_context, code_fix_context,
                 entry_stripped_fields=stripped_fields,
+                dep_fix_context=dep_fix_context,
             )
             code_fix_context = None  # only applies to the first coding attempt
+            dep_fix_context = None   # only applies to the first coding attempt
             stripped_fields = None
 
             try:
@@ -1492,3 +1696,42 @@ def _build_spec_gap_context(analysis: "TestAnalysis") -> dict[str, Any]:
         "failure_analyses": [fa.model_dump() for fa in analysis.failure_analyses],
     }
     return result
+
+
+def _build_env_fix_context(analysis: "TestAnalysis") -> dict[str, Any]:
+    """
+    Build the env_fix_context dict passed back to the test_designer to repair an
+    environment failure (e.g. a missing test-only dependency in requirements-test.txt).
+
+    Firewall-safe whitelist projection — the test_designer is forbidden the raw
+    test_analysis artifact, so only the analyst summary and the recommended_action /
+    evidence of environment-classified failures cross over. Never the raw artifact,
+    never any code.
+    """
+    return {
+        "trigger": "test_error_environment",
+        "test_summary": analysis.summary,
+        "environment_findings": [
+            {
+                "recommended_action": fa.recommended_action,
+                "evidence": fa.evidence,
+            }
+            for fa in analysis.failure_analyses
+            if fa.root_cause_hypothesis == "environment"
+        ],
+    }
+
+
+def _build_dep_fix_context(runner_results: Any) -> dict[str, Any]:
+    """
+    Build the dep_fix_context passed back to the coder to repair a runtime-dependency
+    failure (e.g. a bad/missing package in requirements.txt).
+
+    No firewall projection needed: the coder owns requirements.txt and the runner
+    stderr is its own build output (pip/runtime), not another agent's artifact.
+    """
+    return {
+        "trigger": "runtime_dep_error",
+        "error_phase": getattr(runner_results, "error_phase", None),
+        "stderr_tail": getattr(runner_results, "stderr_tail", ""),
+    }
