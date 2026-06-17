@@ -63,6 +63,7 @@ agents:
     thinking:
       enabled: true
       budget_tokens: 8000
+    streaming: true           # stream chunks to avoid HTTP timeout on long outputs
     system_prompt: "prompts/rendered/architecture_designer.md"
     metadata:
       agent_id: "architecture_designer"
@@ -71,10 +72,11 @@ agents:
   coder:
     model: "claude-opus-4-8"
     temperature: 0.2
-    # 16000 is the safe non-streaming ceiling (the router calls litellm without
-    # stream=True; larger values risk SDK HTTP timeouts). The coder emits whole files
-    # inline, so 8192 truncated mid-JSON on multi-file features. To go higher (opus-4-8
-    # supports 128K) the router must switch to streaming.
+    # 16000 is the safe non-streaming ceiling for this agent (streaming is off here,
+    # so litellm is called without stream=True; larger values risk SDK HTTP timeouts).
+    # The coder emits whole files inline, so 8192 truncated mid-JSON on multi-file
+    # features. To go higher (opus-4-8 supports 128K) set `streaming: true` on this
+    # agent — the router streams per-agent when that flag is enabled.
     max_tokens: 16000
     system_prompt: "prompts/rendered/coder.md"
     metadata:
@@ -121,6 +123,7 @@ agents:
     thinking:
       enabled: true
       budget_tokens: 10000
+    streaming: true           # stream chunks to avoid HTTP timeout on long outputs
     system_prompt: "prompts/rendered/test_analyst.md"
     metadata:
       agent_id: "test_analyst"

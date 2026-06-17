@@ -253,8 +253,71 @@ class ModelRouter:
         if tools and tool_executor is not None:
             return self._run_tool_loop(kwargs, model, agent_id, tools, tool_executor)
 
+        # Streaming lifts the connection-timeout ceiling on long responses. It is
+        # skipped when tools are present (tool_call objects arrive fragmented across
+        # chunks and need reassembly) and on the fallback path (reliability over
+        # token ceiling — see complete(), which never sets streaming for fallback).
+        agent_config = self._config.agents.get(agent_id)
+        if not tools and getattr(agent_config, "streaming", False):
+            return self._stream_completion(kwargs, model, agent_id)
+
         response = litellm.completion(**kwargs)
         return self._normalise(response, model, agent_id)
+
+    def _stream_completion(
+        self, kwargs: dict[str, Any], model: str, agent_id: AgentId
+    ) -> RouterResult:
+        """Accumulate a streamed completion into a RouterResult.
+
+        LiteLLM (1.88.x) separates reasoning and output text on each chunk's delta:
+        `delta.reasoning_content` carries thinking, `delta.content` carries output.
+        Both fields coexist, so no block-type tracking is needed. Streaming chunks
+        expose `.delta` (not `.message`), and usage/finish_reason only settle on the
+        last chunk — so this builds RouterResult directly rather than via _normalise().
+        """
+        thinking_chunks: list[str] = []
+        text_chunks: list[str] = []
+        last_chunk: Any = None
+
+        for chunk in litellm.completion(**kwargs, stream=True):
+            last_chunk = chunk
+            delta = chunk.choices[0].delta
+            rc = getattr(delta, "reasoning_content", None)
+            if rc:
+                thinking_chunks.append(rc)
+            c = getattr(delta, "content", None)
+            if c:
+                text_chunks.append(c)
+
+        thinking = "".join(thinking_chunks) or None
+        text = "".join(text_chunks)
+        json_text = self._extract_json(text)
+
+        finish_reason = (
+            getattr(last_chunk.choices[0], "finish_reason", None)
+            if last_chunk is not None else None
+        )
+        truncated = finish_reason == "length"
+
+        # On streaming, _hidden_params on the last chunk does not carry
+        # litellm_call_id; _call_id falls back to the provider response id (chunk.id),
+        # which is still a unique per-call identifier for cost attribution.
+        litellm_call_id = self._call_id(last_chunk)
+        usage = self._usage_streaming(last_chunk)
+
+        logger.info(
+            "Router(stream): agent=%s model=%s call_id=%s thinking=%s tokens=%s",
+            agent_id, model, litellm_call_id, "yes" if thinking else "no", usage,
+        )
+
+        return RouterResult(
+            content=json_text,
+            litellm_call_id=litellm_call_id,
+            model_used=model,
+            thinking=thinking,
+            usage=usage,
+            truncated=truncated,
+        )
 
     def _run_tool_loop(
         self,
@@ -362,6 +425,25 @@ class ModelRouter:
         if hasattr(response, "usage") and response.usage is not None:
             return dict(response.usage)
         return {}
+
+    @staticmethod
+    def _usage_streaming(last_chunk: Any) -> dict[str, Any]:
+        """Usage for a streamed call. The last chunk's `.usage` is None; LiteLLM
+        stashes the assembled Usage object in `_hidden_params["usage"]` (an object,
+        not a dict)."""
+        if last_chunk is None:
+            return {}
+        # A stream-final chunk may still expose usage directly in some versions.
+        if getattr(last_chunk, "usage", None) is not None:
+            return dict(last_chunk.usage)
+        hidden = getattr(last_chunk, "_hidden_params", {}) or {}
+        usage_obj = hidden.get("usage")
+        if usage_obj is None:
+            return {}
+        try:
+            return dict(usage_obj)
+        except (TypeError, ValueError):
+            return dict(getattr(usage_obj, "__dict__", {}))
 
     def _normalise(self, response: Any, model: str, agent_id: AgentId) -> RouterResult:
         """Extract JSON-bearing text + metadata from a completion response."""
