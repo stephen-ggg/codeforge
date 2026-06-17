@@ -51,6 +51,11 @@ _CODEFORGE_CONFIG_TEMPLATE = """\
 # Merge rules: all keys here override the codeforge installation defaults.
 # You only need to set fields that differ from the defaults.
 
+# Target tech stack. "python" (default) or "nextjs-supabase". The profile supplies a default
+# sandbox image when test_runner.sandbox_image is left blank.
+stack:
+  profile: "python"
+
 repos:
   codeforge_state:
     remote: ""          # git remote URL for this codeforge state repo

@@ -47,6 +47,7 @@ agents:
       budget_tokens: 8000
     inputs:
       - { tag: run_mode,             kind: metadata,  optional: false, desc: "\"new_project\" or \"continuation\"." }
+      - { tag: stack_guidance,       kind: injected,  optional: false, desc: "The target tech stack's conventions (language, layout, interface/import rules). Design within this stack." }
       - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document with acceptance criteria." }
       - { tag: architecture,         kind: state_doc, optional: true,  desc: "Existing architecture (continuation mode). Absent for new projects." }
       - { tag: tech_stack,           kind: state_doc, optional: true,  desc: "Existing locked tech decisions. Absent if none exist yet." }
@@ -60,6 +61,7 @@ agents:
       enabled: false
     inputs:
       - { tag: run_mode,             kind: metadata,  optional: false, desc: "\"new_project\" or \"continuation\"." }
+      - { tag: stack_guidance,       kind: injected,  optional: false, desc: "The target tech stack's conventions (language, source layout, dependency manifest, import rules). Authoritative — follow it exactly." }
       - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document." }
       - { tag: architecture_doc,     kind: artifact,  optional: false, desc: "The architecture design to implement." }
       - { tag: tech_stack,           kind: state_doc, optional: true,  desc: "Locked tech decisions you must comply with." }
@@ -74,6 +76,7 @@ agents:
       enabled: true
       budget_tokens: 6000
     inputs:
+      - { tag: stack_guidance,       kind: injected,  optional: false, desc: "The target tech stack's conventions; review against these idioms." }
       - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document." }
       - { tag: architecture_doc,     kind: artifact,  optional: false, desc: "The architecture the code should implement." }
       - { tag: code_artifact,        kind: artifact,  optional: false, desc: "The generated code with all files." }
@@ -86,6 +89,7 @@ agents:
       enabled: true
       budget_tokens: 6000
     inputs:
+      - { tag: stack_guidance,       kind: injected,  optional: false, desc: "The target tech stack's conventions and stack-specific security concerns to weigh." }
       - { tag: tech_stack,           kind: state_doc, optional: false, desc: "The locked technology decisions for this project." }
       - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document." }
       - { tag: code_artifact,        kind: artifact,  optional: false, desc: "The generated code with all files." }
@@ -96,6 +100,7 @@ agents:
     thinking:
       enabled: false
     inputs:
+      - { tag: stack_guidance,       kind: injected,  optional: false, desc: "The target tech stack's test framework, file layout, import conventions, and test-only dependency declaration." }
       - { tag: requirements_doc,     kind: artifact,  optional: false, desc: "The confirmed requirements document with acceptance criteria." }
       - { tag: interface_manifest,   kind: artifact,  optional: false, desc: "Projection: interfaces, data_contracts, acceptance_criteria. No implementation detail." }
       - { tag: test_coverage_map,    kind: state_doc, optional: true,  desc: "What has already been tested in prior runs." }

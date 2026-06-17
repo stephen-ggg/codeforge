@@ -107,6 +107,17 @@ def _new_run_id() -> str:
     return f"run-{uuid.uuid4().hex[:12]}"
 
 
+# Which stack-profile prompt fragment each agent receives. Reviewers share one fragment;
+# requirements_analyst and test_analyst are stack-agnostic and receive none.
+_STACK_FRAGMENT_FOR_AGENT: dict[str, str] = {
+    "architecture_designer": "architecture",
+    "coder": "coder",
+    "code_reviewer": "reviewer",
+    "security_reviewer": "reviewer",
+    "test_designer": "test_designer",
+}
+
+
 class EscalationError(Exception):
     """Raised when codeforge must escalate to a human."""
 
@@ -282,6 +293,19 @@ class StateMachine:
             **self.run.retry_counters.model_dump(),
             agent_call_count=self.run.agent_call_count,
         )
+
+    def _inject_stack_guidance(self, pkg: Any, agent_id: str) -> None:
+        """Inject the active stack profile's prompt fragment into an agent's context.
+
+        Mirrors the other orchestrator-managed pseudo-state fields (_run_mode, etc.):
+        the agent reads `state.get("_stack_guidance")` in build_user_turn. Agents not in
+        the mapping (requirements_analyst, test_analyst) are stack-agnostic and skipped.
+        """
+        fragment_key = _STACK_FRAGMENT_FOR_AGENT.get(agent_id)
+        if fragment_key is None:
+            return
+        fragment = self._config.stack_profile.prompt_fragment(fragment_key)
+        pkg.state_documents["_stack_guidance"] = fragment or ""
 
     def _apply_outcome(self, outcome: RoutingOutcome) -> None:
         """Apply counter deltas and resets from a routing outcome."""
@@ -824,6 +848,7 @@ class StateMachine:
             pkg = self.assembler.assemble("architecture_designer", self.run.run_id)
 
             # Inject orchestrator-managed fields for build_user_turn()
+            self._inject_stack_guidance(pkg, "architecture_designer")
             pkg.state_documents["_run_mode"] = self.run.run_mode
             pkg.state_documents["_spec_gap_context"] = json.dumps(
                 spec_gap_context if spec_gap_context is not None else None
@@ -962,6 +987,7 @@ class StateMachine:
             pkg = self.assembler.assemble("coder", self.run.run_id)
 
             # Inject orchestrator-managed fields for build_user_turn()
+            self._inject_stack_guidance(pkg, "coder")
             pkg.state_documents["_run_mode"] = self.run.run_mode
             pkg.state_documents["_existing_interfaces"] = json.dumps([])
             pkg.state_documents["_retry_context"] = json.dumps(retry_context)
@@ -1053,6 +1079,7 @@ class StateMachine:
 
         while True:
             pkg = self.assembler.assemble("code_reviewer", self.run.run_id)
+            self._inject_stack_guidance(pkg, "code_reviewer")
 
             user_turn = CodeReviewerAgent(
                 "code_reviewer", self.router, self._config
@@ -1130,6 +1157,7 @@ class StateMachine:
 
         while True:
             pkg = self.assembler.assemble("security_reviewer", self.run.run_id)
+            self._inject_stack_guidance(pkg, "security_reviewer")
 
             user_turn = SecurityReviewerAgent(
                 "security_reviewer", self.router, self._config
@@ -1218,6 +1246,7 @@ class StateMachine:
             pkg = self.assembler.assemble("test_designer", self.run.run_id)
 
             # Inject orchestrator-managed fields for build_user_turn()
+            self._inject_stack_guidance(pkg, "test_designer")
             pkg.state_documents["_code_fix_context"] = json.dumps(code_fix_context)
             pkg.state_documents["_retry_context"] = json.dumps(retry_context)
             pkg.state_documents["_env_fix_context"] = json.dumps(env_fix_context)
@@ -1799,14 +1828,17 @@ def _build_env_fix_context(analysis: "TestAnalysis") -> dict[str, Any]:
 
 def _build_dep_fix_context(runner_results: Any) -> dict[str, Any]:
     """
-    Build the dep_fix_context passed back to the coder to repair a runtime-dependency
-    failure (e.g. a bad/missing package in requirements.txt).
+    Build the dep_fix_context passed back to the coder to repair a runner failure the coder
+    owns: a runtime-dependency failure (bad/missing package in the manifest) or a build /
+    type-check failure (e.g. `tsc --noEmit`). The trigger tells the coder which to fix.
 
-    No firewall projection needed: the coder owns requirements.txt and the runner
-    stderr is its own build output (pip/runtime), not another agent's artifact.
+    No firewall projection needed: the coder owns the dependency manifest and source, and the
+    runner stderr is its own build output (install/compiler), not another agent's artifact.
     """
+    error_phase = getattr(runner_results, "error_phase", None)
+    trigger = "build_error" if error_phase == "build_failed" else "runtime_dep_error"
     return {
-        "trigger": "runtime_dep_error",
-        "error_phase": getattr(runner_results, "error_phase", None),
+        "trigger": trigger,
+        "error_phase": error_phase,
         "stderr_tail": getattr(runner_results, "stderr_tail", ""),
     }

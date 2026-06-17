@@ -23,6 +23,9 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field
 
+from codeforge.stacks.profile import StackProfile
+from codeforge.stacks.registry import DEFAULT_PROFILE_ID, get_profile
+
 
 # ---------------------------------------------------------------------------
 # Typed config shapes
@@ -103,6 +106,11 @@ class ToolsConfig(BaseModel):
     max_tool_turns: int = 12        # caps the per-agent-invocation tool loop
 
 
+class StackConfig(BaseModel):
+    """Selects the target tech-stack profile for the project."""
+    profile: str = DEFAULT_PROFILE_ID
+
+
 class ConfigSnapshot(BaseModel):
     """
     The immutable config snapshot stamped onto CodeforgeRun at run start.
@@ -117,6 +125,9 @@ class ConfigSnapshot(BaseModel):
     agents: dict[str, AgentConfig]
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     repos: ReposConfig | None = None        # None in codeforge default; required in project config
+    # Resolved target tech stack. Defaults to the python profile so a ConfigSnapshot built
+    # directly (tests) still has a valid profile; load_config always resolves it from config.
+    stack_profile: StackProfile = Field(default_factory=lambda: get_profile(DEFAULT_PROFILE_ID))
 
     # Resolved at load time from environment
     anthropic_api_key: str = Field(default="", exclude=True)  # never serialised
@@ -255,6 +266,13 @@ def _parse_config(raw: dict[str, Any]) -> ConfigSnapshot:
     confidence_thresholds: dict[str, float] = raw.get("confidence_thresholds", {})
     test_runner = TestRunnerConfig(**raw.get("test_runner", {}))
 
+    # Resolve the target stack profile, then let it supply the sandbox image when the
+    # project config did not pin one explicitly.
+    stack_cfg = StackConfig(**raw.get("stack", {}))
+    stack_profile = get_profile(stack_cfg.profile)
+    if not test_runner.sandbox_image:
+        test_runner.sandbox_image = stack_profile.default_sandbox_image
+
     raw_agents = raw.get("agents", {})
     agents: dict[str, AgentConfig] = {
         agent_id: AgentConfig(**agent_conf)
@@ -281,4 +299,5 @@ def _parse_config(raw: dict[str, Any]) -> ConfigSnapshot:
         agents=agents,
         tools=tools,
         repos=repos,
+        stack_profile=stack_profile,
     )

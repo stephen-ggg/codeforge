@@ -1,0 +1,62 @@
+# Next.js + Supabase full-stack profile (TypeScript).
+# One project = the whole app: React UI + API routes + Supabase data access, on a single
+# Node toolchain (one package.json, one install, one type-check gate, one vitest run).
+id: "nextjs-supabase"
+language_label: "TypeScript (Next.js App Router + Supabase)"
+
+default_sandbox_image: "node:20-bookworm"
+manifest_filename: "package.json"
+manifest_required: true
+
+# npm installs runtime AND dev dependencies (incl. test tooling) from package.json in one
+# shot, so there is no separate test-only manifest/step.
+install_commands:
+  - "npm ci || npm install"
+test_manifest_filename: null
+test_install_commands: []
+
+# Type-check gate before tests: a type error is a code defect the coder owns. esbuild (which
+# vitest uses) strips types without checking them, so this is the gate that catches them.
+build_commands:
+  - "npx --no-install tsc --noEmit"
+
+# vitest emits a JUnit report via its built-in reporter — reused by the same parser as pytest.
+test_command: "npx --no-install vitest run --reporter=junit --outputFile=results.xml"
+results_path: "/workspace/results.xml"
+workdir: "/workspace"
+
+# Continuation staging: app/, components/, lib/, src/ trees plus root config/manifest files.
+source_globs:
+  - "app/**"
+  - "components/**"
+  - "lib/**"
+  - "src/**"
+  - "public/**"
+  - "package.json"
+  - "tsconfig.json"
+  - "next.config.mjs"
+  - "vitest.config.ts"
+
+runtime_version_regex: "v(\\d+\\.\\d+\\.\\d+)"
+
+# Foundational stack decisions, pre-seeded as locked so the architecture designer designs
+# within the stack and the first run's confirm gate ratifies them once.
+seed_tech_decisions:
+  - id: "TD-001"
+    domain: "language"
+    decision: "TypeScript (strict) throughout."
+    rationale: "Project stack profile: nextjs-supabase."
+    locked: true
+    record: true
+  - id: "TD-002"
+    domain: "framework"
+    decision: "Next.js (App Router): React UI under app/ + components/, backend as Route Handlers under app/api/**/route.ts."
+    rationale: "Single toolchain delivers UI and API in one project; codeforge maintains the frontend↔API contract."
+    locked: true
+    record: true
+  - id: "TD-003"
+    domain: "database"
+    decision: "Supabase (Postgres) accessed via @supabase/supabase-js. Client created in a shared lib/ module reading NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY (browser/anon) and SUPABASE_SERVICE_ROLE_KEY (server only) from env."
+    rationale: "Library + env-config integration; no local database in the test sandbox."
+    locked: true
+    record: true

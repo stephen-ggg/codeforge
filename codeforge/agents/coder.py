@@ -1,7 +1,9 @@
 """
 agents/coder.py — Coder agent.
 
-Implements from the architecture spec. Must emit requirements.txt at repo root.
+Implements from the architecture spec. Must emit the stack's dependency manifest at the
+repo root (requirements.txt for python, package.json for nextjs-supabase) — the filename
+comes from the active stack profile and is enforced by the coder validation gate.
 Never receives test files. On fail_code_bug re-entry receives code_fix_context
 with flagged AC ids only — no test content.
 """
@@ -48,6 +50,7 @@ class CoderAgent(BaseAgent):
 
         payload: dict[str, Any] = {
             "run_mode": state.get("_run_mode", "new_project"),
+            "stack_guidance": state.get("_stack_guidance", ""),
             "requirements_doc": requirements_doc,
             "architecture_doc": architecture_doc,
             "tech_stack_md": state.get("tech_stack"),

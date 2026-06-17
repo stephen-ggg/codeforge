@@ -795,12 +795,13 @@ class TestResult(BaseModel):
 # Drives auto-recovery routing (which agent owns the fix) far more reliably than the
 # test_analyst's free-text root_cause_hypothesis.
 TestRunnerErrorPhase = Literal[
-    "missing_requirements_txt",     # code_artifact had no requirements.txt        → coder
-    "runtime_dep_install_failed",   # pip install -r requirements.txt failed        → coder
-    "test_dep_install_failed",      # pip install -r requirements-test.txt failed   → test_designer
-    "no_results_report",            # pytest produced no JUnit XML report           → test_designer
+    "missing_requirements_txt",     # code_artifact had no dependency manifest      → coder
+    "runtime_dep_install_failed",   # runtime dependency install failed             → coder
+    "build_failed",                 # compile/type-check gate failed (e.g. tsc)     → coder
+    "test_dep_install_failed",      # test-only dependency install failed           → test_designer
+    "no_results_report",            # runner produced no JUnit XML report           → test_designer
     "results_parse_error",          # results.xml was not valid XML                 → (transient)
-    "pytest_exit_error",            # pytest exited with a non-0/1 code             → test_designer
+    "pytest_exit_error",            # test command exited with a non-0/1 code       → test_designer
 ]
 
 
