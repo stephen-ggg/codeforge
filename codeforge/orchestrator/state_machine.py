@@ -133,11 +133,14 @@ class StateMachine:
         self._project_dir = project_dir
         self._run_log_dir = run_log_dir
 
-        # Stores. The artifact store is re-rooted at the per-run directory
-        # (run-logs/<run_id>/) in start_run/resume_run once the run_id is known — this
-        # base-rooted instance is a placeholder that is never written to.
+        # Stores. The artifact store must be rooted at the per-run directory
+        # (run-logs/<run_id>/), which is only known once the run_id exists, so it is
+        # created in start_run/resume_run. It stays None until then: a base-rooted
+        # placeholder would create stray run-logs/{artifacts,raw_outputs,failed_artifacts}/
+        # dirs and, worse, silently absorb writes to the base if re-rooting were ever
+        # skipped. Reach it via the artifact_store property so any unrooted use fails loudly.
         self._project_state = ProjectStateStore(project_dir)
-        self._artifact_store = ArtifactStore(run_log_dir)
+        self._artifact_store: ArtifactStore | None = None
 
         # Core components (initialised in start_run)
         self._run: CodeforgeRun | None = None
@@ -195,7 +198,7 @@ class StateMachine:
         self._manifest = manifest
         self._assembler = ContextAssembler(
             manifest=manifest,
-            artifact_store=self._artifact_store,
+            artifact_store=self.artifact_store,
             project_state=self._project_state,
             pending_writes=self._pending,
             run_log_dir=run_log_dir,
@@ -218,7 +221,7 @@ class StateMachine:
         self._manifest = manifest
         self._assembler = ContextAssembler(
             manifest=manifest,
-            artifact_store=self._artifact_store,
+            artifact_store=self.artifact_store,
             project_state=self._project_state,
             pending_writes=self._pending,
             run_log_dir=run_log_dir,
@@ -262,6 +265,13 @@ class StateMachine:
     def manifest(self) -> FirewallManifest:
         assert self._manifest is not None
         return self._manifest
+
+    @property
+    def artifact_store(self) -> ArtifactStore:
+        assert (
+            self._artifact_store is not None
+        ), "start_run()/resume_run() must be called first"
+        return self._artifact_store
 
     # ------------------------------------------------------------------
     # Counter helpers
@@ -405,7 +415,7 @@ class StateMachine:
         # response for debugging, emit a self-sufficient gate event, and escalate with a
         # clear reason rather than letting it masquerade as a generic malformed_output.
         if result.truncated:
-            artifact_id = self._artifact_store.write_raw(result.content, produced_by=agent_id)
+            artifact_id = self.artifact_store.write_raw(result.content, produced_by=agent_id)
             self.event_log.emit_gate(
                 rule="schema_valid",
                 passed=False,
@@ -438,7 +448,7 @@ class StateMachine:
         allowed = list(access.allowed_consumers if access else [])
         forbidden = list(access.forbidden_consumers if access else [])
 
-        meta = self._artifact_store.write(
+        meta = self.artifact_store.write(
             artifact_type=typed_artifact_type,
             produced_by=typed_agent_id,
             output=output,
@@ -548,7 +558,7 @@ class StateMachine:
         allowed = list(access.allowed_consumers if access else [])
         forbidden = list(access.forbidden_consumers if access else [])
 
-        meta = self._artifact_store.write_failed(
+        meta = self.artifact_store.write_failed(
             artifact_type=typed_artifact_type,
             produced_by=typed_agent_id,
             output=output,
@@ -580,7 +590,7 @@ class StateMachine:
         outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), agent_id)
         self._apply_outcome(outcome)
         if outcome.decision == "escalate":
-            artifact_id = self._artifact_store.write_raw(raw, produced_by=agent_id)
+            artifact_id = self.artifact_store.write_raw(raw, produced_by=agent_id)
             self._escalate(
                 outcome.escalation_reason or "malformed_output", context=artifact_id
             )
@@ -1323,7 +1333,7 @@ class StateMachine:
         """
         from typing import cast
         from codeforge.schemas.contracts import ArtifactType as _AT
-        output = self._artifact_store.get_latest(cast(_AT, artifact_type))
+        output = self.artifact_store.get_latest(cast(_AT, artifact_type))
         if output is None:
             return None
         return dict(output.output) if isinstance(output.output, dict) else output.output
