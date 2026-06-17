@@ -138,3 +138,18 @@ project_state_access:
     allowed_readers:
       - test_designer
       - test_analyst
+
+# Read-only codebase tool access (continuation runs only).
+# Agents listed here may be handed search_code / read_file / find_references /
+# list_dir tools over the existing source repo. Every other agent — crucially
+# test_designer and test_analyst — gets tools=None, structurally: they cannot
+# call a tool that was never offered. This is a SECOND gating layer that must
+# agree with the artifact firewall above; the tool layer ignores the artifact
+# manifest, so blindness has to be enforced here too.
+tool_access:
+  enabled_agents:
+    - architecture_designer
+    - coder
+    - code_reviewer
+    - security_reviewer
+    # NOT: requirements_analyst, test_designer, test_analyst

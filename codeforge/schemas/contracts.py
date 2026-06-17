@@ -155,7 +155,7 @@ RoutingDecision = Literal[
 
 HandoffInvocationType = Literal["first", "retry", "reentry", "re_prompt"]
 
-EventType = Literal["handoff", "gate", "routing", "state_write", "human_interaction"]
+EventType = Literal["handoff", "gate", "routing", "state_write", "human_interaction", "tool_call"]
 
 CodeforgeStatus = Literal[
     "running",
@@ -555,12 +555,40 @@ class CodeFixContext(BaseModel):
     flagged_criterion_ids: list[str]
 
 
+class Edit(BaseModel):
+    """A single surgical edit against an existing file.
+
+    old_string must match exactly once in the target file. Used for
+    change_type == "modified" in continuation runs so the coder patches existing
+    files instead of rewriting them whole (which clobbers unrelated code).
+    """
+    old_string: str
+    new_string: str
+
+    @model_validator(mode="after")
+    def old_string_non_empty(self) -> "Edit":
+        # An empty old_string matches everywhere — str.replace would corrupt the
+        # file. Reject it structurally so a bad edit never reaches apply time.
+        if self.old_string == "":
+            raise ValueError("Edit.old_string must be non-empty")
+        if self.old_string == self.new_string:
+            raise ValueError("Edit is a no-op (old_string == new_string)")
+        return self
+
+
 class CodeFile(BaseModel):
     path: str
-    content: str
+    content: str                            # full file body for new files (and the empty string when only `edits` apply)
     language: str
     change_type: Literal["new", "modified", "deleted"]
     change_reason: str | None = None
+    edits: list[Edit] = Field(default_factory=list)  # surgical edits for change_type == "modified"
+
+    @model_validator(mode="after")
+    def edits_only_on_modified(self) -> "CodeFile":
+        if self.edits and self.change_type != "modified":
+            raise ValueError("edits are only valid when change_type == 'modified'")
+        return self
 
 
 class CoderInput(BaseModel):
@@ -704,6 +732,8 @@ class TestRunnerInput(BaseModel):
     test_suite: TestSuite
     code_artifact: CodeArtifact
     run_config: dict[str, Any]              # {timeout_seconds, environment_vars, sandbox_image}
+    run_mode: Literal["new_project", "continuation"] = "new_project"
+    source_root: str | None = None         # existing source repo root; staged before deltas in continuation
 
 
 class FailedAssertion(BaseModel):
@@ -983,10 +1013,30 @@ class HumanInteractionEvent(OrchestratorEventBase):
     latency_seconds: float | None = None    # inbound only
 
 
+class ToolCallEvent(OrchestratorEventBase):
+    """A single read-only codebase tool call made by a tool-enabled agent.
+
+    Emitted for EVERY invocation — allowed and denied — so a forbidden-agent
+    attempt or a jail escape is permanently recorded in events.jsonl, alongside
+    the per-package AccessEvent. result_summary is a short description (match
+    count / bytes / first line) — never full file contents.
+    """
+    event_type: Literal["tool_call"] = "tool_call"
+    agent_id: LogActor
+    tool_name: str
+    tool_input: dict[str, Any]              # jailed args (query/path/symbol)
+    decision: Literal["allow", "deny"]
+    deny_reason: str | None = None
+    result_summary: str
+    latency_ms: float
+    litellm_call_id: str | None = None      # the model call that requested the tool
+
+
 OrchestratorEventUnion = Union[
     HandoffEvent,
     GateEvent,
     RoutingEvent,
     StateWriteEvent,
     HumanInteractionEvent,
+    ToolCallEvent,
 ]

@@ -37,6 +37,11 @@ test_runner:
   environment_vars: {}
   sandbox_image: ""                   # required; set per deployment
 
+# Read-only codebase tools (continuation runs). Tool-enabled agents are defined
+# in firewall/manifest.yaml (tool_access); this only tunes the loop.
+tools:
+  max_tool_turns: 12                  # per-agent-invocation cap on the tool loop
+
 # Per-agent model configuration
 agents:
   requirements_analyst:

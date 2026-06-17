@@ -22,9 +22,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from codeforge.config.config_loader import ConfigSnapshot
-from codeforge.firewall.assembler import ContextAssembler
-from codeforge.firewall.manifest import load_manifest
+from codeforge.firewall.assembler import ContextAssembler, ContextPackage
+from codeforge.firewall.manifest import FirewallManifest, load_manifest
 from codeforge.model_router.router import ModelRouter
+from codeforge.tools.executor import ToolExecutor
 from codeforge.orchestrator.event_log import EventLog
 from codeforge.orchestrator.gates import GateEvaluator
 from codeforge.orchestrator.pending_writes import PendingWrites
@@ -132,6 +133,7 @@ class StateMachine:
         self._gates: GateEvaluator | None = None
         self._router: ModelRouter | None = None
         self._assembler: ContextAssembler | None = None
+        self._manifest: "FirewallManifest | None" = None
 
         # Tracks which phase is currently executing so escalation events can carry
         # a suggested reentry state for the human operator.
@@ -174,6 +176,7 @@ class StateMachine:
         self._router = ModelRouter(self._config)
 
         manifest = load_manifest()
+        self._manifest = manifest
         self._assembler = ContextAssembler(
             manifest=manifest,
             artifact_store=self._artifact_store,
@@ -195,6 +198,7 @@ class StateMachine:
         self._gates = GateEvaluator(self._validator, self._event_log, self._config.to_dict())
         self._router = ModelRouter(self._config)
         manifest = load_manifest()
+        self._manifest = manifest
         self._assembler = ContextAssembler(
             manifest=manifest,
             artifact_store=self._artifact_store,
@@ -236,6 +240,11 @@ class StateMachine:
     def assembler(self) -> ContextAssembler:
         assert self._assembler is not None
         return self._assembler
+
+    @property
+    def manifest(self) -> FirewallManifest:
+        assert self._manifest is not None
+        return self._manifest
 
     # ------------------------------------------------------------------
     # Counter helpers
@@ -281,6 +290,34 @@ class StateMachine:
     # Agent invocation (with pre/post event emission)
     # ------------------------------------------------------------------
 
+    def _build_tool_executor(
+        self, agent_id: str, assembly_id: str | None
+    ) -> ToolExecutor | None:
+        """Build a read-only tool executor for tool-eligible continuation invocations.
+
+        Returns None (no tools) unless ALL of: run_mode is continuation, the agent
+        is in the firewall tool allowlist, and a source repo path is configured.
+        The blind set (test_designer, test_analyst, requirements_analyst) never
+        passes the allowlist check, so they are never handed tools.
+        """
+        if self.run.run_mode != "continuation":
+            return None
+        if not self.manifest.tools_enabled_for(cast(LogActor, agent_id)):
+            return None
+        repos = self._config.repos
+        if repos is None or not repos.source_code.path:
+            return None
+
+        return ToolExecutor(
+            root=Path(repos.source_code.path),
+            agent_id=cast(LogActor, agent_id),
+            manifest=self.manifest,
+            event_log=self.event_log,
+            counters=self._counters_snap(),
+            assembly_id=assembly_id or "",
+            max_tool_turns=self._config.tools.max_tool_turns,
+        )
+
     def _invoke_agent(
         self,
         agent_id: str,
@@ -290,10 +327,16 @@ class StateMachine:
         assembly_id: str | None = None,
         reprompt_reason: str | None = None,
         stripped_fields: list[str] | None = None,
+        context_package: ContextPackage | None = None,
     ) -> str:
         """
         Pre-invocation ceiling check → handoff event → LLM call → return raw string.
         Increments agent_call_count. Does NOT validate the response.
+
+        For tool-eligible continuation invocations a read-only tool loop runs
+        inside the single LLM call; the whole loop counts as ONE agent invocation
+        for the global ceiling. Tool AccessEvents are appended to context_package
+        (when provided) and the package is re-persisted for audit completeness.
         """
         typed_agent_id = cast(AgentId, agent_id)
         typed_actor = cast(LogActor, agent_id)
@@ -307,13 +350,24 @@ class StateMachine:
             self._apply_outcome(outcome)
             self._escalate("global_ceiling_exceeded", agent_id)
 
+        # Read-only codebase tools (continuation + tool-enabled agents only).
+        executor = self._build_tool_executor(agent_id, assembly_id)
+        tools = executor.tool_schemas() if executor is not None else None
+
         # LLM call
         result = self.router.complete(
             agent_id=typed_agent_id,
             system_prompt=system_prompt,
             user_turn=user_turn,
             run_id=self.run.run_id,
+            tools=tools,
+            tool_executor=executor if tools else None,
         )
+
+        # Persist tool reads into the context package audit surface.
+        if executor is not None and executor.access_events and context_package is not None:
+            context_package.access_events.extend(executor.access_events)
+            self.assembler.persist(context_package)
 
         self.run.agent_call_count += 1
 
@@ -533,6 +587,7 @@ class StateMachine:
                 "architecture_designer", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
                 reprompt_reason=reprompt.reason if reprompt is not None else None,
+                context_package=pkg,
             )
 
             gate_result = self.gates.evaluate(
@@ -672,6 +727,7 @@ class StateMachine:
                 # stripped_fields only applies to the entry invocation (describes what
                 # the orchestrator stripped from the previous phase's review findings)
                 stripped_fields=entry_stripped_fields if first_call else None,
+                context_package=pkg,
             )
             first_call = False
 
@@ -754,6 +810,7 @@ class StateMachine:
                 "code_reviewer", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
                 reprompt_reason=reprompt.reason if reprompt is not None else None,
+                context_package=pkg,
             )
 
             gate_result = self.gates.evaluate(
@@ -836,6 +893,7 @@ class StateMachine:
                 "security_reviewer", system_prompt, user_turn,
                 assembly_id=pkg.assembly_id,
                 reprompt_reason=reprompt.reason if reprompt is not None else None,
+                context_package=pkg,
             )
 
             gate_result = self.gates.evaluate(
@@ -1197,12 +1255,20 @@ class StateMachine:
                 assert code_art is not None
                 assert test_suite is not None
                 runner = TestRunner(self._config)
+                repos = self._config.repos
+                source_root = (
+                    repos.source_code.path
+                    if repos is not None and self.run.run_mode == "continuation"
+                    else None
+                )
                 try:
                     runner_results = runner.run(
                         TestRunnerInput(
                             test_suite=test_suite,
                             code_artifact=code_art,
                             run_config={},
+                            run_mode=self.run.run_mode,
+                            source_root=source_root,
                         )
                     )
                     next_state = "test_analysis"

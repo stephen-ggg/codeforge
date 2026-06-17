@@ -64,12 +64,21 @@ class FirewallManifest:
     """
     artifact_access: dict[str, ArtifactAccess] = field(default_factory=dict)
     project_state_access: dict[str, ProjectStateAccess] = field(default_factory=dict)
+    tool_enabled_agents: list[LogActor] = field(default_factory=list)
 
     def get_artifact_access(self, artifact_type: ArtifactType) -> ArtifactAccess | None:
         return self.artifact_access.get(artifact_type)
 
     def get_state_access(self, document: ProjectStateDocument) -> ProjectStateAccess | None:
         return self.project_state_access.get(document)
+
+    def tools_enabled_for(self, agent: LogActor) -> bool:
+        """Return True if agent may be handed read-only codebase tools.
+
+        The blind set (test_designer, test_analyst, requirements_analyst) is
+        enforced by omission here — they never appear in tool_access.enabled_agents.
+        """
+        return agent in self.tool_enabled_agents
 
 
 def load_manifest(manifest_path: Path | None = None) -> FirewallManifest:
@@ -130,6 +139,15 @@ def load_manifest(manifest_path: Path | None = None) -> FirewallManifest:
         manifest.project_state_access[doc_str] = ProjectStateAccess(
             document=cast(ProjectStateDocument, doc_str),
             allowed_readers=allowed,
+        )
+
+    # Parse tool access (optional section — absent means no agent gets tools)
+    raw_tool = raw.get("tool_access", {})
+    if raw_tool:
+        if not isinstance(raw_tool, dict):
+            raise ValueError("manifest.tool_access must be a mapping")
+        manifest.tool_enabled_agents = _parse_actor_list(
+            raw_tool.get("enabled_agents", []), "tool_access.enabled_agents"
         )
 
     return manifest

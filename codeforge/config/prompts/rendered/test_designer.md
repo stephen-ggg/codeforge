@@ -179,6 +179,7 @@ Your response payload must be a single JSON object matching the schema below. Pr
 | `output.test_cases[].code[].language` | `string` | required |
 | `output.test_cases[].code[].change_type` | `'new' | 'modified' | 'deleted'` | required |
 | `output.test_cases[].code[].change_reason` | `string | null` | optional |
+| `output.test_cases[].code[].edits` | `Edit[]` | optional |
 | `output.test_cases[].explicitly_not_testing` | `string[]` | required |
 | `output.test_infrastructure` | `CodeFile[]` | required |
 | `output.test_infrastructure[].path` | `string` | required |
@@ -186,6 +187,9 @@ Your response payload must be a single JSON object matching the schema below. Pr
 | `output.test_infrastructure[].language` | `string` | required |
 | `output.test_infrastructure[].change_type` | `'new' | 'modified' | 'deleted'` | required |
 | `output.test_infrastructure[].change_reason` | `string | null` | optional |
+| `output.test_infrastructure[].edits` | `Edit[]` | optional |
+| `output.test_infrastructure[].edits[].old_string` | `string` | required |
+| `output.test_infrastructure[].edits[].new_string` | `string` | required |
 | `output.coverage_map` | `object[]` | required |
 | `assumptions_made` | `Assumption[]` | required |
 | `assumptions_made[].id` | `string` | required |

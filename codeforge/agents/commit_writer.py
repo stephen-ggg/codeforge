@@ -41,6 +41,7 @@ from codeforge.schemas.contracts import (
     CommitWriterResult,
     TestSuite,
 )
+from codeforge.store.edits import EditError, apply_edits
 
 
 class CommitWriter:
@@ -182,6 +183,13 @@ def _write_code_artifact(
         if f.change_type == "deleted":
             if target.exists():
                 target.unlink()
+        elif f.change_type == "modified" and f.edits:
+            # Continuation: apply surgical edits against the existing file so
+            # unrelated code is never clobbered. Fail loudly on no/ambiguous match.
+            if not target.exists():
+                raise EditError(f"cannot apply edits to missing file: {f.path}")
+            original = target.read_text(encoding="utf-8")
+            target.write_text(apply_edits(original, f.edits), encoding="utf-8")
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f.content, encoding="utf-8")

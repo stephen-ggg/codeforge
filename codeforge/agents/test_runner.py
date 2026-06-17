@@ -26,6 +26,7 @@ import json
 import tarfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal, cast
 
 import docker
@@ -39,6 +40,7 @@ from codeforge.schemas.contracts import (
     TestRunnerResults,
     TestSuite,
 )
+from codeforge.store.edits import apply_edits
 
 
 class InfrastructureError(Exception):
@@ -60,12 +62,23 @@ class TestRunner:
             or self._config.test_runner.sandbox_image
         )
 
+        # Resolve the full set of source files to stage. For continuation we start
+        # from the existing repo and apply the coder's deltas (new / edits / delete)
+        # so tests run against the WHOLE tree, not just the changed files.
+        try:
+            code_entries = _resolve_code_entries(input)
+        except Exception as exc:  # EditError or filesystem error
+            return _error_result(
+                started_at, sandbox_image,
+                stderr=f"Failed to assemble source tree: {exc}",
+            )
+
         # requirements.txt must be present — fail fast before touching Docker
-        has_req = any(f.path == "requirements.txt" for f in input.code_artifact.files)
+        has_req = any(path == "workspace/requirements.txt" for path, _ in code_entries)
         if not has_req:
             return _error_result(
                 started_at, sandbox_image,
-                stderr="Missing requirements.txt in code_artifact",
+                stderr="Missing requirements.txt in staged source tree",
             )
 
         try:
@@ -91,7 +104,8 @@ class TestRunner:
             container.exec_run("mkdir -p /workspace/src /workspace/tests")
 
             # Stage files into container
-            _copy_code_files(container, input.code_artifact)
+            if code_entries:
+                container.put_archive("/", _make_tar(code_entries))
             has_req_test = _copy_test_files(container, input.test_suite)
 
             # Install runtime deps (fail fast — error if this fails)
@@ -150,17 +164,44 @@ class TestRunner:
 # File staging helpers
 # ---------------------------------------------------------------------------
 
-def _copy_code_files(container: Any, code_artifact: CodeArtifact) -> None:
-    entries: list[tuple[str, str]] = []
-    for f in code_artifact.files:
+def _stageable(path: Path) -> bool:
+    try:
+        return path.is_file() and b"\x00" not in path.read_bytes()[:4096]
+    except OSError:
+        return False
+
+
+def _resolve_code_entries(input: TestRunnerInput) -> list[tuple[str, str]]:
+    """Return (container_path, content) pairs for the source tree to stage.
+
+    new_project: just the code_artifact files (current behaviour).
+    continuation: the existing repo (src/** + requirements.txt) with the coder's
+    deltas applied — new files written, modified files patched via edits, deleted
+    files removed — so the sandbox holds the complete post-change tree.
+    """
+    files: dict[str, str] = {}  # workspace-relative key, e.g. "src/foo.py" / "requirements.txt"
+
+    if input.run_mode == "continuation" and input.source_root:
+        root = Path(input.source_root)
+        src_root = root / "src"
+        if src_root.is_dir():
+            for p in src_root.rglob("*"):
+                if _stageable(p):
+                    files[f"src/{p.relative_to(src_root).as_posix()}"] = p.read_text(errors="replace")
+        req = root / "requirements.txt"
+        if req.is_file():
+            files["requirements.txt"] = req.read_text(errors="replace")
+
+    for f in input.code_artifact.files:
+        key = "requirements.txt" if f.path == "requirements.txt" else f"src/{f.path}"
         if f.change_type == "deleted":
-            continue
-        if f.path == "requirements.txt":
-            entries.append(("workspace/requirements.txt", f.content))
+            files.pop(key, None)
+        elif f.change_type == "modified" and f.edits:
+            files[key] = apply_edits(files.get(key, ""), f.edits)
         else:
-            entries.append((f"workspace/src/{f.path}", f.content))
-    if entries:
-        container.put_archive("/", _make_tar(entries))
+            files[key] = f.content
+
+    return [(f"workspace/{key}", content) for key, content in files.items()]
 
 
 def _copy_test_files(container: Any, test_suite: TestSuite) -> bool:

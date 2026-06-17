@@ -33,6 +33,7 @@ orchestrator's job. It only extracts the JSON-bearing text from the response env
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -83,12 +84,15 @@ _SCRATCHPAD_INSTRUCTION = (
 
 @dataclass
 class RouterResult:
-    """Result of a single LiteLLM completion call."""
+    """Result of a completion call (or a tool loop that ends in a completion)."""
     content: str                            # extracted JSON-bearing text (thinking stripped)
     litellm_call_id: str                    # authoritative cost-attribution identifier
     model_used: str                         # actual model that responded (may be fallback)
     thinking: str | None = None             # raw reasoning, for raw_outputs/ — not validated
     usage: dict[str, Any] = field(default_factory=dict)
+    # One entry per inner model call when a tool loop ran (else empty). Each entry
+    # carries the litellm_call_id + usage so cost attribution survives the loop.
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 class RouterError(Exception):
@@ -122,8 +126,14 @@ class ModelRouter:
         system_prompt: str,
         user_turn: str,
         run_id: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Any | None = None,
     ) -> RouterResult:
         """Call the configured LLM for agent_id and return a normalised result.
+
+        When `tools` and `tool_executor` are supplied (continuation runs, tool-
+        enabled agents), the call runs a read-only tool loop before producing the
+        final JSON artifact; otherwise it is a single completion as before.
 
         Raises:
             RouterError: if both primary and fallback calls fail.
@@ -174,6 +184,8 @@ class ModelRouter:
                 metadata=metadata,
                 agent_id=agent_id,
                 thinking_param=thinking_param,
+                tools=tools,
+                tool_executor=tool_executor,
             )
         except Exception as primary_exc:
             logger.warning(
@@ -210,6 +222,8 @@ class ModelRouter:
                     metadata=metadata,
                     agent_id=agent_id,
                     thinking_param=fb_thinking,
+                    tools=tools,
+                    tool_executor=tool_executor,
                 )
             except Exception as fallback_exc:
                 logger.error(
@@ -229,8 +243,79 @@ class ModelRouter:
         metadata: dict[str, str],
         agent_id: AgentId,
         thinking_param: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: Any | None = None,
     ) -> RouterResult:
-        """Make a single litellm.completion() call and normalise the result."""
+        """Single completion, or a read-only tool loop when tools are supplied."""
+        kwargs = self._build_kwargs(model, messages, temperature, max_tokens, metadata, thinking_param)
+
+        if tools and tool_executor is not None:
+            return self._run_tool_loop(kwargs, model, agent_id, tools, tool_executor)
+
+        response = litellm.completion(**kwargs)
+        return self._normalise(response, model, agent_id)
+
+    def _run_tool_loop(
+        self,
+        base_kwargs: dict[str, Any],
+        model: str,
+        agent_id: AgentId,
+        tools: list[dict[str, Any]],
+        tool_executor: Any,
+    ) -> RouterResult:
+        """Drive call → tool_use → tool_result until a final JSON answer.
+
+        The whole loop counts as ONE agent invocation for the global ceiling (the
+        orchestrator increments once); per-inner-call cost is collected in
+        result.tool_calls. A turn budget bounds the loop; on exhaustion we force a
+        final no-tools call so the agent must produce its artifact.
+        """
+        messages: list[dict[str, Any]] = list(base_kwargs["messages"])
+        collected: list[dict[str, Any]] = []
+        max_turns = int(getattr(tool_executor, "max_tool_turns", 12))
+
+        for _ in range(max_turns):
+            kwargs = {**base_kwargs, "messages": messages, "tools": tools}
+            response = litellm.completion(**kwargs)
+            call_id = self._call_id(response)
+            collected.append({"litellm_call_id": call_id, "usage": self._usage(response)})
+
+            message = response.choices[0].message
+            tool_calls = getattr(message, "tool_calls", None)
+            if not tool_calls:
+                result = self._normalise(response, model, agent_id)
+                result.tool_calls = collected
+                return result
+
+            messages.append(self._assistant_tool_message(message))
+            for tc in tool_calls:
+                name = tc.function.name
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                tool_result = tool_executor.execute(name, args, call_id)
+                messages.append(
+                    {"role": "tool", "tool_call_id": tc.id, "content": tool_result}
+                )
+
+        # Turn budget exhausted — force a final answer with no tools offered.
+        logger.info("Tool loop budget exhausted for agent '%s'; forcing final answer.", agent_id)
+        kwargs = {**base_kwargs, "messages": messages}
+        response = litellm.completion(**kwargs)
+        result = self._normalise(response, model, agent_id)
+        result.tool_calls = collected
+        return result
+
+    @staticmethod
+    def _build_kwargs(
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        metadata: dict[str, str],
+        thinking_param: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -245,23 +330,47 @@ class ModelRouter:
                 kwargs["temperature"] = 1
         elif _supports_temperature(model):
             kwargs["temperature"] = temperature
+        return kwargs
 
-        response = litellm.completion(**kwargs)
+    @staticmethod
+    def _assistant_tool_message(message: Any) -> dict[str, Any]:
+        """Reconstruct the assistant turn (with tool_calls) for the next request."""
+        return {
+            "role": "assistant",
+            "content": getattr(message, "content", "") or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in message.tool_calls
+            ],
+        }
 
-        message = response.choices[0].message
-        raw_content = getattr(message, "content", None)
-        text, thinking = self._extract_content(raw_content, message)
-        json_text = self._extract_json(text)
-
-        litellm_call_id: str = (
+    @staticmethod
+    def _call_id(response: Any) -> str:
+        return (
             getattr(response, "_hidden_params", {}).get("litellm_call_id")
             or getattr(response, "id", "")
             or ""
         )
 
-        usage: dict[str, Any] = {}
+    @staticmethod
+    def _usage(response: Any) -> dict[str, Any]:
         if hasattr(response, "usage") and response.usage is not None:
-            usage = dict(response.usage)
+            return dict(response.usage)
+        return {}
+
+    def _normalise(self, response: Any, model: str, agent_id: AgentId) -> RouterResult:
+        """Extract JSON-bearing text + metadata from a completion response."""
+        message = response.choices[0].message
+        raw_content = getattr(message, "content", None)
+        text, thinking = self._extract_content(raw_content, message)
+        json_text = self._extract_json(text)
+
+        litellm_call_id = self._call_id(response)
+        usage = self._usage(response)
 
         logger.info(
             "Router: agent=%s model=%s call_id=%s thinking=%s tokens=%s",

@@ -33,6 +33,7 @@ from codeforge.schemas.contracts import (
     RoutingEvent,
     StateWriteEvent,
     StateWriteTarget,
+    ToolCallEvent,
     WriteSource,
 )
 from codeforge.firewall.audit import EventLogProtocol
@@ -209,6 +210,32 @@ class EventLog(EventLogProtocol):
             gate_condition=gate_condition,
             content_hash_before=content_hash_before,
             content_hash_after=content_hash_after,
+        )
+        self.emit(event)
+
+    def emit_tool_call(
+        self,
+        agent_id: LogActor,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        decision: str,
+        result_summary: str,
+        latency_ms: float,
+        counters: CountersSnapshot,
+        deny_reason: str | None = None,
+        litellm_call_id: str | None = None,
+    ) -> None:
+        event = ToolCallEvent(
+            **self._base_fields(counters),
+            event_type="tool_call",
+            agent_id=agent_id,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            decision=decision,  # type: ignore[arg-type]
+            deny_reason=deny_reason,
+            result_summary=result_summary,
+            latency_ms=latency_ms,
+            litellm_call_id=litellm_call_id,
         )
         self.emit(event)
 

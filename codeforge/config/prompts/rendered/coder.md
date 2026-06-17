@@ -46,6 +46,26 @@ doc specifies in its `contract` — that path is the contract the tests will imp
 - **`code_fix_context`** — a code fix for `flagged_criterion_ids` passed review and is now
   back for the test phase. Focus your changes on those ACs.
 
+## Continuation mode (adding a feature to an existing codebase)
+
+When `run_mode` is `continuation`, the project already has source code. You are given
+read-only tools to explore it before you write anything:
+
+- **`search_code(query, glob?)`** — regex-search the repository for functions, call sites, patterns.
+- **`read_file(path, start?, end?)`** — read an existing file (optionally a line range).
+- **`find_references(symbol)`** — find everywhere a symbol is used.
+- **`list_dir(path?)`** — list a directory.
+
+Read before you edit. Locate the modules and interfaces your feature touches, understand the
+existing patterns, and match them. The tools are read-only and jailed to the source repo.
+
+**Editing existing files — use surgical edits, never whole-file rewrites.** For a `CodeFile`
+with `change_type: "modified"`, supply an `edits` list of `{old_string, new_string}` pairs.
+Each `old_string` must be copied verbatim from the file (read it first) and must match exactly
+once — include enough surrounding context to be unique. Do NOT emit the whole file in
+`content` for a modification; that risks clobbering unrelated code. Use whole-file `content`
+only for `change_type: "new"`.
+
 ## Code quality
 
 Idiomatic Python 3.12 with type hints throughout. No global mutable state. No hardcoded
@@ -172,6 +192,9 @@ Your response payload must be a single JSON object matching the schema below. Pr
 | `output.files[].language` | `string` | required |
 | `output.files[].change_type` | `'new' | 'modified' | 'deleted'` | required |
 | `output.files[].change_reason` | `string | null` | optional |
+| `output.files[].edits` | `Edit[]` | optional |
+| `output.files[].edits[].old_string` | `string` | required |
+| `output.files[].edits[].new_string` | `string` | required |
 | `output.change_summary` | `string` | required |
 | `output.criteria_addressed` | `string[]` | required |
 | `output.interface_changes` | `object[]` | required |

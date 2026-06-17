@@ -14,10 +14,19 @@ from __future__ import annotations
 
 import json
 import sys
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
 import typer
+
+
+class RunMode(str, Enum):
+    """Run modes for `codeforge run`. Kept in sync with the run_mode Literal in
+    schemas/contracts.py."""
+
+    new_project = "new_project"
+    continuation = "continuation"
 
 from codeforge.cli.interaction import HumanInteraction
 from codeforge.cli.lock import CodeforgeAlreadyRunningError, CodeforgeLock
@@ -221,10 +230,19 @@ def run(
         help="One-sentence feature brief passed to the requirements analyst.",
         show_default=False,
     ),
-    run_mode: str = typer.Option(
-        "new_project",
+    run_mode: RunMode = typer.Option(
+        RunMode.new_project,
         "--run-mode",
-        help="'new_project' or 'continuation'.",
+        help=(
+            "Pipeline mode. "
+            "'new_project': build a project from scratch (the brief describes the "
+            "whole project). "
+            "'continuation': add a feature to the existing codebase — the "
+            "architecture designer, coder, and reviewers get read-only tools to "
+            "search and read the current source, and edits are applied as surgical "
+            "diffs (the brief describes the feature to add)."
+        ),
+        case_sensitive=False,
     ),
 ) -> None:
     """
@@ -232,6 +250,12 @@ def run(
 
     Acquires a per-project lock, drives all seven phases, and
     commits both codeforge state and source code on success.
+
+    Run modes:
+      new_project   Greenfield build; agents design and implement from the brief alone.
+      continuation  Add a feature to an existing repo; tool-enabled agents read the
+                    current code and emit diff-based edits. Requires the repos block
+                    in .codeforge/codeforge.config.yaml.
     """
     config = _load_config_or_exit(project_dir)
     lock = CodeforgeLock(project_dir)
@@ -247,7 +271,7 @@ def run(
     sm = StateMachine(config, project_dir, run_log_dir)
 
     try:
-        codeforge_run = sm.start_run(run_mode, brief)
+        codeforge_run = sm.start_run(run_mode.value, brief)
         _save_brief(run_log_dir, codeforge_run.run_id, brief)
         typer.echo(f"Run started: {codeforge_run.run_id}")
 

@@ -273,6 +273,16 @@ class ContextAssembler:
         )
         package.state_documents[document] = md
 
+    def persist(self, package: ContextPackage) -> None:
+        """Re-write a context package to disk after later mutation.
+
+        Tool-enabled agents accumulate AccessEvents during their tool loop; the
+        orchestrator appends them to the package and calls this so the on-disk
+        audit surface records every read the agent made, not just assembly-time
+        decisions.
+        """
+        self._write_context_package(package)
+
     def _write_context_package(self, package: ContextPackage) -> None:
         """Write the full context package to disk for audit purposes."""
         path = self._context_packages_dir / f"{package.assembly_id}.json"

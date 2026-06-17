@@ -91,6 +91,11 @@ class ReposConfig(BaseModel):
     source_code: SourceCodeRepoConfig
 
 
+class ToolsConfig(BaseModel):
+    """Read-only codebase tool settings (continuation runs)."""
+    max_tool_turns: int = 12        # caps the per-agent-invocation tool loop
+
+
 class ConfigSnapshot(BaseModel):
     """
     The immutable config snapshot stamped onto CodeforgeRun at run start.
@@ -103,6 +108,7 @@ class ConfigSnapshot(BaseModel):
     confidence_thresholds: dict[str, float]
     test_runner: TestRunnerConfig
     agents: dict[str, AgentConfig]
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
     repos: ReposConfig | None = None        # None in codeforge default; required in project config
 
     # Resolved at load time from environment
@@ -248,6 +254,8 @@ def _parse_config(raw: dict[str, Any]) -> ConfigSnapshot:
         for agent_id, agent_conf in raw_agents.items()
     }
 
+    tools = ToolsConfig(**raw.get("tools", {}))
+
     repos: ReposConfig | None = None
     if "repos" in raw and raw["repos"]:
         raw_repos = raw["repos"]
@@ -264,5 +272,6 @@ def _parse_config(raw: dict[str, Any]) -> ConfigSnapshot:
         confidence_thresholds=confidence_thresholds,
         test_runner=test_runner,
         agents=agents,
+        tools=tools,
         repos=repos,
     )
