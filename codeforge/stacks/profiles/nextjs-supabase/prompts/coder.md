@@ -64,9 +64,13 @@ the repo root.
 Component test files use JSX **without importing React** (the modern automatic JSX
 runtime). Vitest will not transform that correctly unless `@vitejs/plugin-react` is
 registered — without it, JSX compiles via the classic transform and every component
-test fails at render with `ReferenceError: React is not defined`. So `vitest.config.ts`
-**must** load the React plugin (it defaults to the automatic runtime) and set the jsdom
-environment:
+test fails at render with `ReferenceError: React is not defined`. Component tests also
+import `@testing-library/jest-dom`, which calls `expect.extend()` at module-load time
+and needs `expect` available as a **global** — Vitest only provides that when
+`globals: true` is set. Without it, those tests abort at import with `ReferenceError:
+expect is not defined` before any assertion runs. So `vitest.config.ts` **must** load
+the React plugin (it defaults to the automatic runtime), enable `globals: true`, and set
+the jsdom environment:
 
 ```ts
 import { defineConfig } from "vitest/config";
@@ -75,7 +79,7 @@ import path from "node:path";
 
 export default defineConfig({
   plugins: [react()],
-  test: { environment: "jsdom" },
+  test: { globals: true, environment: "jsdom" },
   resolve: { alias: { "@": path.resolve(__dirname, ".") } },
 });
 ```

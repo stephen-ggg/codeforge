@@ -19,6 +19,11 @@ devDependencies and installed by the runner — **you do not manage dependencies
 - Import vitest primitives explicitly: `import { describe, it, expect, vi } from "vitest"`.
 - For React components use `@testing-library/react` (`render`, `screen`) — the jsdom
   environment is configured in `vitest.config.ts`.
+- For DOM matchers (`toBeInTheDocument`, etc.) use the bare side-effect import
+  `import "@testing-library/jest-dom"`. It relies on the global `expect` that
+  `globals: true` in `vitest.config.ts` provides — and that file is owned by the coder.
+  Never emit or edit `vitest.config.ts` (or any setup/config file) to make matchers work;
+  emit test files only.
 - **Mock Supabase** — never hit a real backend. `vi.mock("@/lib/supabase", ...)` (or whichever
   module exports the client) and assert against the mock. The sandbox has no database.
 - For Route Handlers, construct a `Request`/`NextRequest`, call the exported handler, and
