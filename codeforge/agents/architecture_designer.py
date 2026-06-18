@@ -42,6 +42,7 @@ class ArchitectureDesignerAgent(BaseAgent):
 
         payload: dict[str, Any] = {
             "run_mode": state.get("_run_mode", "new_project"),
+            "stack_guidance": state.get("_stack_guidance", ""),
             "requirements_doc": requirements_doc,
             "current_architecture_md": state.get("architecture"),
             "tech_stack_md": state.get("tech_stack"),

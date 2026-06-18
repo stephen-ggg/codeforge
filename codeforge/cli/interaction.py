@@ -27,6 +27,7 @@ from codeforge.schemas.contracts import (
     ReentryDirective,
     ReentryState,
     RequirementsDoc,
+    RetryCounters,
 )
 
 # Valid reentry states per escalation reason (informational — shown to operator)
@@ -228,6 +229,8 @@ class HumanInteraction:
 
         reentry_state = _prompt_reentry_state(reentry_options, default=suggestion)
 
+        counter_resets = _prompt_counter_resets()
+
         if choice == "3":
             change_summary = input("Describe the change you are making: ").strip()
             notes = input("Additional notes: ").strip()
@@ -236,7 +239,7 @@ class HumanInteraction:
                 change_summary=change_summary,
                 reentry_directive=ReentryDirective(
                     reentry_state=cast(ReentryState, reentry_state),
-                    counter_resets=[],
+                    counter_resets=counter_resets,
                     reset_global_ceiling=False,
                 ),
                 human_notes=notes,
@@ -248,7 +251,7 @@ class HumanInteraction:
             outcome="approved",
             reentry_directive=ReentryDirective(
                 reentry_state=cast(ReentryState, reentry_state),
-                counter_resets=[],
+                counter_resets=counter_resets,
                 reset_global_ceiling=False,
             ),
             human_notes=notes,
@@ -263,6 +266,32 @@ def _as_clarification_question(raw: Any) -> ClarificationQuestion:
     if isinstance(raw, ClarificationQuestion):
         return raw
     return ClarificationQuestion(**raw)
+
+
+def _prompt_counter_resets() -> list[str]:
+    """Prompt the operator for retry counters to zero on reentry.
+
+    A loop that exhausted its budget (e.g. ``infrastructure``) will re-escalate
+    immediately on resume unless its counter is reset. Accepts a comma-separated
+    list of counter names, or Enter for none. Invalid names are re-prompted.
+    """
+    valid = list(RetryCounters.model_fields)
+
+    print("\nReset retry counters? (zeroes a loop's budget so reentry can retry)")
+    print(f"  Available: {', '.join(valid)}")
+    prompt = "Counters to reset (comma-separated, Enter = none): "
+
+    while True:
+        raw = input(prompt).strip()
+        if raw == "":
+            return []
+        names = [n.strip() for n in raw.split(",") if n.strip()]
+        invalid = [n for n in names if n not in valid]
+        if invalid:
+            print(f"Unknown counter(s): {', '.join(invalid)}. Choose from the list above.")
+            continue
+        # De-duplicate while preserving order.
+        return list(dict.fromkeys(names))
 
 
 def _prompt_reentry_state(options: list[str], default: str | None = None) -> str:

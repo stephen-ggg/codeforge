@@ -39,6 +39,7 @@ class SecurityReviewerAgent(BaseAgent):
         artifacts = context_package.artifacts
 
         payload: dict[str, Any] = {
+            "stack_guidance": state.get("_stack_guidance", ""),
             "tech_stack_md": state.get("tech_stack", ""),
             "requirements_doc": artifacts["requirements_doc"].model_dump()
             if "requirements_doc" in artifacts else None,

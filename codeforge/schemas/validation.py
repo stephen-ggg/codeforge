@@ -250,15 +250,18 @@ class OutputValidator:
 
         # ---- Coder ----
         if agent_id == "coder" and isinstance(payload, CodeArtifact):
-            # requirements_txt_present fires first (coding_missing_requirements_txt
-            # before coding_acceptance_criteria_gap)
-            has_requirements_txt = any(
-                f.path == "requirements.txt" for f in payload.files
-            )
-            if not has_requirements_txt:
+            # Dependency-manifest gate fires first (coding_missing_requirements_txt before
+            # coding_acceptance_criteria_gap). The manifest filename is stack-specific
+            # (requirements.txt for python, package.json for nextjs-supabase); the rule id
+            # stays "requirements_txt_present" since the routing/recovery keys on it.
+            stack = self._config.get("stack_profile", {})
+            manifest = stack.get("manifest_filename", "requirements.txt")
+            manifest_required = stack.get("manifest_required", True)
+            has_manifest = any(f.path == manifest for f in payload.files)
+            if manifest_required and not has_manifest:
                 return False, self._make_violation(
                     rule="requirements_txt_present",
-                    detail="CodeArtifact does not include requirements.txt at repo root",
+                    detail=f"CodeArtifact does not include {manifest} at repo root",
                     missing_requirements_txt=True,
                     attempt_number=attempt_number,
                     original_input_ref=original_input_ref,

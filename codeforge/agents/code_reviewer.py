@@ -36,6 +36,7 @@ class CodeReviewerAgent(BaseAgent):
         artifacts = context_package.artifacts
 
         payload: dict[str, Any] = {
+            "stack_guidance": state.get("_stack_guidance", ""),
             "requirements_doc": artifacts["requirements_doc"].model_dump()
             if "requirements_doc" in artifacts else None,
             "architecture_doc": artifacts["architecture_doc"].model_dump()

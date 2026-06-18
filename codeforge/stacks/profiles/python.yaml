@@ -1,0 +1,42 @@
+# Python stack profile — reproduces codeforge's original Python-only behaviour exactly.
+# This is the default profile; existing projects pick it up with no config change.
+id: "python"
+language_label: "Python 3.12"
+
+default_sandbox_image: "python:3.12-slim"
+manifest_filename: "requirements.txt"
+manifest_required: true
+
+# Runtime deps install (fail-fast). Test-only deps install conditionally when the
+# test_designer staged a requirements-test.txt.
+install_commands:
+  - "pip install --quiet -r /workspace/requirements.txt"
+test_manifest_filename: "requirements-test.txt"
+test_install_commands:
+  - "pip install --quiet -r /workspace/requirements-test.txt"
+
+# No compile/type-check gate for Python.
+build_commands: []
+
+# pytest core's built-in JUnit reporter (no third-party plugin) so a pinned pytest in a
+# generated requirements file cannot break the results channel. Invoked as `python -m
+# pytest` (not the console script) so /workspace lands on sys.path and `src.` imports resolve.
+test_command: "python -m pytest tests/ --junit-xml=/workspace/results.xml -o junit_family=xunit2 -v"
+results_path: "/workspace/results.xml"
+workdir: "/workspace"
+
+# Continuation staging: the existing src/ tree plus the root requirements.txt.
+source_globs:
+  - "src/**"
+  - "requirements.txt"
+
+runtime_version_regex: "Python (\\d+\\.\\d+\\.\\d+)"
+
+# The language decision the architecture designer historically locked as TD-001.
+seed_tech_decisions:
+  - id: "TD-001"
+    domain: "language"
+    decision: "Python 3.12 with type hints throughout."
+    rationale: "Project stack profile: python."
+    locked: true
+    record: true

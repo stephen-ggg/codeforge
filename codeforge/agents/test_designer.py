@@ -81,6 +81,7 @@ class TestDesignerAgent(BaseAgent):
             }, ensure_ascii=False)
 
         payload: dict[str, Any] = {
+            "stack_guidance": state.get("_stack_guidance", ""),
             "requirements_doc": artifacts["requirements_doc"].model_dump()
             if "requirements_doc" in artifacts else None,
             "interface_manifest": artifacts["interface_manifest"].model_dump()

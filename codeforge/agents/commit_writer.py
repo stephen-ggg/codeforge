@@ -162,6 +162,19 @@ class CommitWriter:
                     f"'{default_branch}' and re-run."
                 )
 
+            # The fast-forward below updates the canonical working tree in place, so it
+            # must be clean: git aborts a merge that would overwrite locally-modified
+            # tracked files, and that abort is not self-healing — retrying escalates with
+            # an opaque "local changes would be overwritten" error. Fail fast and actionable
+            # instead, naming the offending files (untracked files don't block a merge).
+            if repo.is_dirty(untracked_files=False):
+                dirty = ", ".join(sorted(d.a_path for d in repo.index.diff(None))) or "(staged changes)"
+                raise ValueError(
+                    f"source repo has uncommitted local changes ({dirty}) — the canonical "
+                    f"checkout must be clean between runs so the fast-forward can advance it. "
+                    f"Commit, stash, or discard them and re-run."
+                )
+
             base_sha = repo.commit(default_branch).hexsha  # explicit, immutable base
 
             # Build the feature commit in a throwaway worktree off the immutable base.

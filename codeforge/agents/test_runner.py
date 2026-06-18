@@ -49,6 +49,7 @@ from codeforge.schemas.contracts import (
     TestRunnerResults,
     TestSuite,
 )
+from codeforge.stacks.profile import StackProfile
 from codeforge.store.edits import apply_edits
 
 
@@ -66,29 +67,34 @@ class TestRunner:
 
     def run(self, input: TestRunnerInput) -> TestRunnerResults:
         started_at = _now()
+        profile = self._config.stack_profile
         sandbox_image = (
             input.run_config.get("sandbox_image")
             or self._config.test_runner.sandbox_image
+            or profile.default_sandbox_image
         )
+        workdir = profile.workdir
 
         # Resolve the full set of source files to stage. For continuation we start
         # from the existing repo and apply the coder's deltas (new / edits / delete)
         # so tests run against the WHOLE tree, not just the changed files.
         try:
-            code_entries = _resolve_code_entries(input)
+            code_entries = _resolve_code_entries(input, profile)
         except Exception as exc:  # EditError or filesystem error
             return _error_result(
                 started_at, sandbox_image,
                 stderr=f"Failed to assemble source tree: {exc}",
             )
 
-        # requirements.txt must be present — fail fast before touching Docker
-        has_req = any(path == "workspace/requirements.txt" for path, _ in code_entries)
-        if not has_req:
-            return _error_result(
-                started_at, sandbox_image, "missing_requirements_txt",
-                stderr="Missing requirements.txt in staged source tree",
-            )
+        # The dependency manifest must be present — fail fast before touching Docker.
+        if profile.manifest_required:
+            manifest_key = f"workspace/{profile.manifest_filename}"
+            has_manifest = any(path == manifest_key for path, _ in code_entries)
+            if not has_manifest:
+                return _error_result(
+                    started_at, sandbox_image, "missing_requirements_txt",
+                    stderr=f"Missing {profile.manifest_filename} in staged source tree",
+                )
 
         try:
             client = docker.DockerClient.from_env()  # type: ignore[attr-defined]
@@ -105,61 +111,59 @@ class TestRunner:
             container = client.containers.create(
                 image=sandbox_image,
                 command="sleep infinity",
-                working_dir="/workspace",
+                working_dir=workdir,
             )
             container.start()
 
-            # Ensure workspace directories exist
-            container.exec_run("mkdir -p /workspace/src /workspace/tests")
+            # Ensure the workspace root exists. Subdirectories are created automatically by
+            # put_archive when staging files, so we don't assume any stack-specific layout.
+            container.exec_run(f"mkdir -p {workdir}")
 
             # Stage files into container
             if code_entries:
                 container.put_archive("/", _make_tar(code_entries))
-            has_req_test = _copy_test_files(container, input.test_suite)
+            has_test_manifest = _copy_test_files(container, input.test_suite, profile)
 
-            # Install runtime deps (fail fast — error if this fails)
-            exit_code, out = container.exec_run(
-                "pip install --quiet -r /workspace/requirements.txt",
-                workdir="/workspace",
+            # Install runtime deps (fail fast — error if this fails).
+            err = _run_steps(
+                container, profile.install_commands, workdir,
+                started_at, sandbox_image, "runtime_dep_install_failed",
             )
-            if exit_code != 0:
-                return _error_result(
-                    started_at, sandbox_image, "runtime_dep_install_failed",
-                    stderr=_decode(out)[-4096:],
-                )
+            if err is not None:
+                return err
 
-            # Install test-only deps after runtime deps. Check the exit code: a failed
-            # test-dep install otherwise surfaces later as an opaque "no report" error.
-            if has_req_test:
-                exit_code, out = container.exec_run(
-                    "pip install --quiet -r /workspace/requirements-test.txt",
-                    workdir="/workspace",
+            # Install test-only deps after runtime deps, only when the profile uses a
+            # separate test manifest and the test_designer staged it. A failed test-dep
+            # install otherwise surfaces later as an opaque "no report" error.
+            if has_test_manifest and profile.test_install_commands:
+                err = _run_steps(
+                    container, profile.test_install_commands, workdir,
+                    started_at, sandbox_image, "test_dep_install_failed",
                 )
-                if exit_code != 0:
-                    return _error_result(
-                        started_at, sandbox_image, "test_dep_install_failed",
-                        stderr=_decode(out)[-4096:],
-                    )
+                if err is not None:
+                    return err
 
-            # Run pytest, emitting a JUnit XML report via pytest core (no plugin).
-            # Invoked as `python -m pytest` (not the console script) so the working
-            # directory /workspace lands on sys.path — tests import the app via the
-            # `src.` package the manifest/test_designer prescribes, which only resolves
-            # when /workspace is importable.
-            exit_code, out = container.exec_run(
-                "python -m pytest tests/ --junit-xml=/workspace/results.xml -o junit_family=xunit2 -v",
-                workdir="/workspace",
+            # Compile/type-check gate (e.g. `tsc --noEmit`). Empty for interpreted stacks.
+            # A failure here is a code defect the coder owns.
+            err = _run_steps(
+                container, profile.build_commands, workdir,
+                started_at, sandbox_image, "build_failed",
             )
-            pytest_stdout = _decode(out)
+            if err is not None:
+                return err
 
-            # Extract results.xml from container
-            results_raw = _extract_file(container, "/workspace/results.xml")
+            # Run the suite, emitting a JUnit XML report (pytest core / vitest --reporter=junit).
+            exit_code, out = container.exec_run(profile.test_command, workdir=workdir)
+            test_stdout = _decode(out)
+
+            # Extract the JUnit report from the container
+            results_raw = _extract_file(container, profile.results_path)
 
             if results_raw is None:
                 return _error_result(
                     started_at, sandbox_image, "no_results_report",
-                    stdout=pytest_stdout[-4096:],
-                    stderr=f"pytest produced no JUnit XML report (exit={exit_code})",
+                    stdout=test_stdout[-4096:],
+                    stderr=f"test command produced no JUnit XML report (exit={exit_code})",
                 )
 
             return _parse_junit_report(
@@ -167,8 +171,9 @@ class TestRunner:
                 exit_code,
                 started_at,
                 sandbox_image,
-                pytest_stdout,
+                test_stdout,
                 input.test_suite,
+                profile.runtime_version_regex,
             )
 
         finally:
@@ -178,6 +183,34 @@ class TestRunner:
                     container.remove(force=True)
                 except Exception:
                     pass
+
+
+# ---------------------------------------------------------------------------
+# Command execution helper
+# ---------------------------------------------------------------------------
+
+def _run_steps(
+    container: Any,
+    commands: list[str],
+    workdir: str,
+    started_at: str,
+    sandbox_image: str,
+    error_phase: "TestRunnerErrorPhase",
+) -> TestRunnerResults | None:
+    """Run a sequence of shell commands in the container, fail-fast.
+
+    Returns an error TestRunnerResults tagged with error_phase on the first non-zero
+    exit, or None if every command succeeded. Commands are run via `sh -c` so shell
+    operators (e.g. `npm ci || npm install`) work.
+    """
+    for cmd in commands:
+        exit_code, out = container.exec_run(["sh", "-c", cmd], workdir=workdir)
+        if exit_code != 0:
+            return _error_result(
+                started_at, sandbox_image, error_phase,
+                stderr=_decode(out)[-4096:],
+            )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -191,26 +224,22 @@ def _stageable(path: Path) -> bool:
         return False
 
 
-def _resolve_code_entries(input: TestRunnerInput) -> list[tuple[str, str]]:
+def _resolve_code_entries(input: TestRunnerInput, profile: StackProfile) -> list[tuple[str, str]]:
     """Return (container_path, content) pairs for the source tree to stage.
 
     new_project: just the code_artifact files (current behaviour).
-    continuation: the existing repo (src/** + requirements.txt) with the coder's
+    continuation: the existing repo (the profile's source_globs) with the coder's
     deltas applied — new files written, modified files patched via edits, deleted
     files removed — so the sandbox holds the complete post-change tree.
     """
-    files: dict[str, str] = {}  # workspace-relative key, e.g. "src/foo.py" / "requirements.txt"
+    files: dict[str, str] = {}  # workspace-relative key, e.g. "src/foo.py" / "package.json"
 
     if input.run_mode == "continuation" and input.source_root:
         root = Path(input.source_root)
-        src_root = root / "src"
-        if src_root.is_dir():
-            for p in src_root.rglob("*"):
-                if _stageable(p):
-                    files[f"src/{p.relative_to(src_root).as_posix()}"] = p.read_text(errors="replace")
-        req = root / "requirements.txt"
-        if req.is_file():
-            files["requirements.txt"] = req.read_text(errors="replace")
+        for rel in _expand_globs(root, profile.source_globs):
+            p = root / rel
+            if _stageable(p):
+                files[rel] = p.read_text(errors="replace")
 
     for f in input.code_artifact.files:
         # Coder paths are project-root-relative and verbatim (src/foo.py,
@@ -226,23 +255,41 @@ def _resolve_code_entries(input: TestRunnerInput) -> list[tuple[str, str]]:
     return [(f"workspace/{key}", content) for key, content in files.items()]
 
 
-def _copy_test_files(container: Any, test_suite: TestSuite) -> bool:
-    """Stage test files verbatim; returns True if requirements-test.txt was found."""
+def _expand_globs(root: Path, patterns: list[str]) -> list[str]:
+    """Expand the profile's source_globs under root into root-relative posix file paths.
+
+    Patterns ending in `/**` are treated as recursive directory matches (their whole
+    subtree of files is staged); other patterns are passed to Path.glob directly. Only
+    regular files are returned — directory entries are filtered out by the caller's
+    _stageable check, but we also skip them here to keep the list clean.
+    """
+    found: dict[str, None] = {}  # ordered set of relative posix paths
+    for pattern in patterns:
+        glob_pattern = f"{pattern}/*" if pattern.endswith("/**") else pattern
+        for p in root.glob(glob_pattern):
+            if p.is_file():
+                found[p.relative_to(root).as_posix()] = None
+    return list(found)
+
+
+def _copy_test_files(container: Any, test_suite: TestSuite, profile: StackProfile) -> bool:
+    """Stage test files verbatim; returns True if the profile's test manifest was staged."""
     entries: list[tuple[str, str]] = []
-    has_req_test = False
+    has_test_manifest = False
+    test_manifest = profile.test_manifest_filename
 
     for test_case in test_suite.test_cases:
         for f in test_case.code:
             entries.append((_workspace_path(f.path), f.content))
 
     for f in test_suite.test_infrastructure:
-        if f.path == "requirements-test.txt":
-            has_req_test = True
+        if test_manifest is not None and f.path == test_manifest:
+            has_test_manifest = True
         entries.append((_workspace_path(f.path), f.content))
 
     if entries:
         container.put_archive("/", _make_tar(entries))
-    return has_req_test
+    return has_test_manifest
 
 
 def _workspace_path(path: str) -> str:
@@ -293,6 +340,7 @@ def _parse_junit_report(
     sandbox_image: str,
     pytest_stdout: str,
     test_suite: TestSuite,
+    runtime_version_regex: str | None = None,
 ) -> TestRunnerResults:
     try:
         root = ElementTree.fromstring(results_raw)
@@ -315,8 +363,7 @@ def _parse_junit_report(
         name = case.get("name", "")
         duration_ms = float(case.get("time", "0") or 0) * 1000
 
-        rel_path = _classname_to_path(classname or name)
-        test_case_id = path_to_case_id.get(rel_path, f"{classname}::{name}" if classname else name)
+        test_case_id = _match_case_id(classname, name, path_to_case_id)
 
         failure = case.find("failure")
         error = case.find("error")
@@ -364,11 +411,28 @@ def _parse_junit_report(
         completed_at=_now(),
         overall_status=overall_status,
         test_results=test_results,
-        environment_info={"sandbox_image": sandbox_image, "runtime_version": _python_version(pytest_stdout)},
+        environment_info={
+            "sandbox_image": sandbox_image,
+            "runtime_version": _runtime_version(pytest_stdout, runtime_version_regex),
+        },
         stdout_tail=pytest_stdout[-4096:],
         stderr_tail="",
         error_phase=error_phase,
     )
+
+
+def _match_case_id(classname: str, name: str, path_to_case_id: dict[str, str]) -> str:
+    """Map a JUnit <testcase> back to a test_case_id, framework-agnostically.
+
+    Different runners populate `classname` differently: pytest uses a dotted module path
+    (`tests.test_add`), vitest uses the test file path (`lib/cards.test.ts`). We try the raw
+    classname (vitest), then the pytest dotted→path transform, against the test files' paths.
+    Falls back to `classname::name` when nothing matches.
+    """
+    for candidate in (classname, _classname_to_path(classname or name)):
+        if candidate in path_to_case_id:
+            return path_to_case_id[candidate]
+    return f"{classname}::{name}" if classname else name
 
 
 def _classname_to_path(classname: str) -> str:
@@ -383,19 +447,28 @@ def _classname_to_path(classname: str) -> str:
     return module_path
 
 
-def _python_version(pytest_stdout: str) -> str:
-    """Best-effort Python version from pytest's session header (e.g. '-- Python 3.12.13')."""
-    match = re.search(r"Python (\d+\.\d+\.\d+)", pytest_stdout)
+def _runtime_version(test_stdout: str, regex: str | None) -> str:
+    """Best-effort runtime version from the test command's stdout, per the profile's regex.
+
+    For Python this matches pytest's session header ('-- Python 3.12.13'). Returns "" when
+    the profile defines no regex or the pattern does not match.
+    """
+    if not regex:
+        return ""
+    match = re.search(regex, test_stdout)
     return match.group(1) if match else ""
 
 
 def _error_result(
     started_at: str,
     sandbox_image: str,
-    error_phase: "TestRunnerErrorPhase",
+    error_phase: "TestRunnerErrorPhase | None" = None,
     stdout: str = "",
     stderr: str = "",
 ) -> TestRunnerResults:
+    """Build an error result. error_phase is optional: an unclassified failure (e.g. the
+    source tree could not be assembled) leaves it None, which routing handles by falling back
+    to route_test_analysis_error rather than an agent-specific recovery."""
     return TestRunnerResults(
         run_id=str(uuid.uuid4()),
         started_at=started_at,
