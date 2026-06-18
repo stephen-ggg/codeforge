@@ -211,6 +211,38 @@ def test_commit_source_code_missing_main_errors(
     assert "main" not in [h.name for h in repo.heads]
 
 
+def test_commit_source_code_dirty_tree_errors(
+    minimal_config: ConfigSnapshot,
+    tmp_path: Path,
+) -> None:
+    """A canonical checkout with uncommitted local changes (e.g. a manual `npm install`
+    left package.json dirty) would make the fast-forward abort opaquely and burn retries.
+    Fail fast and actionable, naming the offending file, with main left untouched."""
+    source_path = tmp_path / "source"
+    repo = _bootstrap_source_repo(source_path)
+    base_sha = repo.head.commit.hexsha
+    # A tracked file committed at base, then locally modified (uncommitted).
+    tracked = source_path / "package.json"
+    tracked.write_text('{"name": "app"}\n')
+    repo.git.add("-A")
+    repo.git.commit("-m", "add package.json")
+    base_sha = repo.head.commit.hexsha
+    tracked.write_text('{"name": "app", "dirty": true}\n')
+
+    config = _config_with_source_repo(minimal_config, source_path, remote="")
+    writer = CommitWriter(config, source_path, run_log_dir=tmp_path / "run-logs")
+    result = writer.commit_source_code(_source_commit_input())
+
+    assert result.success is False
+    assert "uncommitted" in (result.error_message or "").lower()
+    assert "package.json" in (result.error_message or "")
+    # main untouched and the local change preserved (not silently discarded).
+    assert repo.active_branch.name == "main"
+    assert repo.head.commit.hexsha == base_sha
+    assert "dirty" in tracked.read_text()
+    assert _no_worktrees_left(repo)
+
+
 def test_commit_source_code_failure_leaves_main_clean(
     minimal_config: ConfigSnapshot,
     tmp_path: Path,
