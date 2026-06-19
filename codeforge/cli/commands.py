@@ -226,6 +226,43 @@ def _do_commit(
 
 
 # ---------------------------------------------------------------------------
+# list-runs helper
+# ---------------------------------------------------------------------------
+
+def _read_run_summary(run_log_dir: Path, run_id: str) -> dict[str, Any] | None:
+    """Read a single run's summary from disk. Returns None if the run is unreadable."""
+    run_dir = run_log_dir / run_id
+    run_file = run_dir / "codeforge_run.json"
+    if not run_file.exists():
+        return None
+    try:
+        data: dict[str, Any] = json.loads(run_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    brief_file = run_dir / "brief.txt"
+    brief = brief_file.read_text(encoding="utf-8").strip() if brief_file.exists() else None
+
+    # Surface the reason for the latest unresolved escalation, if any.
+    escalation_reason: str | None = None
+    escalations = data.get("escalations") or []
+    if escalations:
+        latest = escalations[-1]
+        if not latest.get("resolved"):
+            escalation_reason = latest.get("reason")
+
+    return {
+        "run_id": data.get("run_id", run_id),
+        "status": data.get("status"),
+        "started_at": data.get("started_at"),
+        "run_mode": data.get("run_mode"),
+        "brief": brief,
+        "escalation_reason": escalation_reason,
+        "agent_call_count": data.get("agent_call_count"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Non-interactive resume helper
 # ---------------------------------------------------------------------------
 
@@ -588,6 +625,42 @@ def resume(
 
     finally:
         lock.release()
+
+
+@app.command("list-runs")
+def list_runs(
+    project_dir: Path = typer.Option(
+        ...,
+        "--project-dir",
+        "-d",
+        help="Path to the managed project directory.",
+        show_default=False,
+    ),
+) -> None:
+    """
+    List all runs for a project, ordered newest first.
+
+    Outputs a JSON array to stdout. Each element contains:
+      run_id, status, started_at, run_mode, brief, escalation_reason, agent_call_count
+
+    escalation_reason is non-null only when the latest escalation is unresolved
+    (i.e. the run is awaiting a resume decision).
+    """
+    run_log_dir = _run_log_dir(project_dir)
+    if not run_log_dir.exists():
+        typer.echo("[]")
+        return
+
+    summaries: list[dict[str, Any]] = []
+    for entry in run_log_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        summary = _read_run_summary(run_log_dir, entry.name)
+        if summary is not None:
+            summaries.append(summary)
+
+    summaries.sort(key=lambda s: s.get("started_at") or "", reverse=True)
+    typer.echo(json.dumps(summaries, indent=2))
 
 
 # ---------------------------------------------------------------------------
