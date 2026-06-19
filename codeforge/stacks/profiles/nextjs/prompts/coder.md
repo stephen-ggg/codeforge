@@ -32,7 +32,7 @@ standard toolchain so the type-check and tests run. A workable baseline:
 ```json
 {
   "name": "app", "private": true, "type": "module",
-  "scripts": { "build": "next build", "test": "vitest run" },
+  "scripts": { "dev": "next dev", "build": "next build", "test": "vitest run" },
   "dependencies": {
     "next": "^14", "react": "^18", "react-dom": "^18"
   },
