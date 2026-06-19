@@ -208,12 +208,14 @@ class StateMachine:
 
         manifest = load_manifest()
         self._manifest = manifest
+        repos = self._config.repos
         self._assembler = ContextAssembler(
             manifest=manifest,
             artifact_store=self.artifact_store,
             project_state=self._project_state,
             pending_writes=self._pending,
             run_log_dir=run_log_dir,
+            source_root=Path(repos.source_code.path) if repos and repos.source_code.path else None,
         )
 
         self._event_log.update_run_snapshot(self._run)
@@ -231,12 +233,14 @@ class StateMachine:
         self._router = ModelRouter(self._config)
         manifest = load_manifest()
         self._manifest = manifest
+        repos = self._config.repos
         self._assembler = ContextAssembler(
             manifest=manifest,
             artifact_store=self.artifact_store,
             project_state=self._project_state,
             pending_writes=self._pending,
             run_log_dir=run_log_dir,
+            source_root=Path(repos.source_code.path) if repos and repos.source_code.path else None,
         )
 
     # ------------------------------------------------------------------

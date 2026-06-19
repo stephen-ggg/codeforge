@@ -24,10 +24,12 @@ from codeforge.schemas.contracts import (
     AgentId,
     AgentOutput,
     ArtifactType,
+    CodeArtifact,
     LogActor,
     ProjectStateDocument,
 )
 from codeforge.store.artifact_store import ArtifactStore
+from codeforge.store.edits import resolve_code_artifact_edits
 from codeforge.store.project_state import ProjectStateStore
 from codeforge.firewall.manifest import FirewallManifest
 
@@ -132,11 +134,13 @@ class ContextAssembler:
         project_state: ProjectStateStore,
         pending_writes: PendingWritesProtocol,
         run_log_dir: Path,
+        source_root: Path | None = None,
     ) -> None:
         self._manifest = manifest
         self._artifact_store = artifact_store
         self._project_state = project_state
         self._pending_writes = pending_writes
+        self._source_root = source_root
         self._context_packages_dir = run_log_dir / "context_packages"
         self._context_packages_dir.mkdir(parents=True, exist_ok=True)
 
@@ -208,6 +212,13 @@ class ContextAssembler:
         output = self._artifact_store.get_latest(artifact_type)
         if output is None:
             return  # exists() returned True but get_latest returned None — race; skip
+
+        # For code_artifact, resolve any edits-only files to full content so
+        # review agents (code_reviewer, security_reviewer) see complete file bodies.
+        if artifact_type == "code_artifact" and self._source_root is not None:
+            code = CodeArtifact.model_validate(output.output)
+            code = resolve_code_artifact_edits(code, self._source_root)
+            output = output.model_copy(update={"output": code.model_dump()})
 
         meta = self._artifact_store.get_latest_meta(artifact_type)
         artifact_id = meta.artifact_id if meta else f"type:{artifact_type}"
