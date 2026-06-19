@@ -1461,7 +1461,7 @@ class StateMachine:
         test_suite: TestSuite | None = None
         runner_results: Any = None
 
-        if initial_state == "requirements":
+        if initial_state in ("requirements", "requirements_clarification"):
             req_doc = self.run_requirements(human_brief, human_interface, prompts["requirements_analyst"])
             next_state = "architecture"
         else:
