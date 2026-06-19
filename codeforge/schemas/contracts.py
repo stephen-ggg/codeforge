@@ -136,6 +136,7 @@ GateRule = Literal[
     "coverage_map_valid",
     "unique_test_paths",
     "requirements_txt_present",
+    "package_json_dev_script",
     "schema_version_match",
     "global_ceiling",
     "locked_tech_decision",

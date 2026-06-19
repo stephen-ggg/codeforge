@@ -268,6 +268,27 @@ class OutputValidator:
                     counter="coder_validation",
                 )
 
+            # For Next.js stacks, package.json must include "dev": "next dev" in scripts.
+            if manifest == "package.json":
+                manifest_file = next(
+                    (f for f in payload.files if f.path == manifest), None
+                )
+                if manifest_file:
+                    try:
+                        pkg = json.loads(manifest_file.content)
+                        scripts = pkg.get("scripts", {})
+                        if "dev" not in scripts:
+                            return False, self._make_violation(
+                                rule="package_json_dev_script",
+                                detail='package.json scripts is missing "dev": "next dev" — add it so the app can be run locally',
+                                missing_requirements_txt=False,
+                                attempt_number=attempt_number,
+                                original_input_ref=original_input_ref,
+                                counter="coder_validation",
+                            )
+                    except (json.JSONDecodeError, AttributeError):
+                        pass  # malformed JSON is caught by the structural validator
+
         # ---- Architecture designer ----
         if agent_id == "architecture_designer" and isinstance(payload, ArchitectureDoc):
             for entry in payload.criteria_coverage:
