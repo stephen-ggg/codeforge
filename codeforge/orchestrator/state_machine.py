@@ -121,9 +121,10 @@ _STACK_FRAGMENT_FOR_AGENT: dict[str, str] = {
 class EscalationError(Exception):
     """Raised when codeforge must escalate to a human."""
 
-    def __init__(self, reason: EscalationReason, context: str = "") -> None:
+    def __init__(self, reason: EscalationReason, context: str = "", phase: str | None = None) -> None:
         self.reason = reason
         self.context = context
+        self.phase = phase
         super().__init__(f"Codeforge escalated: {reason} — {context}")
 
 
@@ -336,7 +337,7 @@ class StateMachine:
         self.run.escalations.append(event)
         self.run.status = "failed_escalated"
         self.event_log.update_run_snapshot(self.run)
-        raise EscalationError(reason, context)
+        raise EscalationError(reason, context, phase=self._current_phase)
 
     # ------------------------------------------------------------------
     # Agent invocation (with pre/post event emission)
