@@ -115,6 +115,50 @@ It creates the directory layout, copies the default config, seeds the stack's lo
 decisions, scaffolds a working source base, and initializes both git repos on `main`.
 Supported stacks: **`python`**, **`nextjs-supabase`**.
 
+### Optional: create and wire up remote repos
+
+If you want CodeForge to push commits and open PRs, create two GitHub repos — one for the
+state and one for the source — then add them to your project config.
+
+**1. Create the repos** (skip whichever you already have):
+
+```bash
+gh repo create my-app-state  --private
+gh repo create my-app        --private
+```
+
+**2. Initialize local git repos** (the `/new-project` skill does this automatically; only
+needed when scaffolding manually):
+
+```bash
+git -C /path/to/my-app/codeforge-state init && \
+  git -C /path/to/my-app/codeforge-state remote add origin git@github.com:you/my-app-state.git
+
+git -C /path/to/my-app/source init && \
+  git -C /path/to/my-app/source remote add origin git@github.com:you/my-app.git
+```
+
+**3. Add the `repos:` block to your project config**
+(`.codeforge/codeforge.config.yaml` inside the project dir):
+
+```yaml
+repos:
+  codeforge_state:
+    remote: "git@github.com:you/my-app-state.git"
+    branch: "main"                  # branch CodeForge pushes state to
+
+  source_code:
+    path: "/path/to/my-app/source"  # absolute path to the local source repo
+    remote: "git@github.com:you/my-app.git"
+    default_branch: "main"          # branch that accumulates each successful run
+    branch_prefix: "codeforge/"     # feature branches are named codeforge/<run-id>
+    pr_target: "main"               # PRs are opened against this branch
+    auto_merge: false               # set true to auto-merge PRs on the remote
+```
+
+All fields except `codeforge_state.remote` and `source_code.path` / `source_code.remote`
+have the defaults shown above, so you only need to set what differs.
+
 ### Or scaffold manually
 
 ```bash
@@ -126,7 +170,7 @@ you need to set:
 
 - `stack.profile` — `"python"` or `"nextjs-supabase"`
 - `test_runner.sandbox_image` — e.g. `python:3.12-slim` or `node:20-bookworm`
-- the `repos:` block — paths and remotes for the state repo and the source repo
+- the `repos:` block — paths and remotes for the state repo and the source repo (see above)
 
 A project directory layout looks like:
 
