@@ -87,7 +87,6 @@ routing `detail` contains `error_phase=...`, follow the test-execution branch be
 regardless of the escalation `reason`. Let the `detail` and `error_phase` drive you,
 not just the reason label.
 
-
 - `low_confidence` / `block_flag` → find the producing `handoff` event's
   `assembly_id`, open `context_packages/<assembly_id>.json`, and check `access_events`
   for `deny` decisions (with `reason_code`). A missing input the agent was denied is a
@@ -109,6 +108,33 @@ not just the reason label.
 - `human_required` → summarize the pending `human_interaction` and `suggested_reentry_state`.
 - `commit_failure` → focus on the commit-phase routing/gate `detail`.
 
+## 4a. Classify: codeforge bug vs. agent error
+
+Before writing the recommended next step, decide which of these applies:
+
+**Codeforge bug** (fix the framework, not the agent) — look for:
+- The same gate `rule` fires on two or more retry attempts with identical or near-identical
+  `detail`. A correctly-implemented gate + correctly-prompted agent should not produce the
+  exact same violation twice in a row.
+- A gate fires on a `modified` file but the agent's artifact shows the fix was placed in
+  `edits[]` rather than `content` — the gate may not be applying edits before checking.
+- A gate rule has no corresponding entry in the agent's re-prompt handling section — the
+  agent had no instructions for recovering from that specific violation.
+- The gate `detail` describes a structural contract the agent could not have known about
+  from its prompt (undocumented rule, newly added gate with no prompt update).
+
+**Agent error** (reprompt on resume is the right fix) — look for:
+- Different gate rules fire on each attempt, or the `detail` strings vary meaningfully —
+  the agent is making distinct mistakes, not hitting the same wall.
+- A single attempt fails a gate that is clearly documented in the agent's re-prompt
+  handling section with correct recovery instructions.
+- The artifact shows the agent understood the rule but produced wrong output anyway
+  (wrong field type, missing required value, logic error in generated code).
+
+When the evidence is mixed (some attempts look systemic, others look like agent errors),
+call it a codeforge bug if the final attempt failed the same rule as the first — the
+agent never had a path to succeed.
+
 ## 5. Report (inline only — write nothing to disk)
 
 Emit a structured report:
@@ -117,11 +143,17 @@ Emit a structured report:
 2. **Where it failed** — the decisive event: `sequence`, row/rule, and quoted `detail`.
 3. **Root cause** — the artifact / flag / raw-output / `error_phase` evidence. Give a
    clickable file path for every artifact you cite so the human can dig further.
-4. **Recommended next step** — which agent owns the fix (use the `error_phase` mapping
-   above where it applies), and when an escalation exists, a candidate resume directive
-   (`reentry_state` + `counter_resets`) drawn from `suggested_reentry_state`. Label this
-   clearly as a SUGGESTION, not an action you will take.
-5. **If inconclusive** — name the specific files and `sequence` numbers to read next.
+4. **Classification** — state clearly: **Codeforge bug** or **Agent error**, with a
+   one-sentence rationale drawn from step 4a. This determines what kind of fix is needed.
+5. **Recommended next step**:
+   - **Codeforge bug** → name the specific file(s) to fix in the codeforge source
+     (gate implementation, agent prompt, or both) and describe what is wrong. Then
+     SUGGEST a simple `approve` resume (option 1, reentry state + counter reset) *after*
+     the fix is applied — no reprompt needed.
+   - **Agent error** → name the agent that owns the fix and SUGGEST a `modify` resume
+     (option 3) with a concrete change_summary the operator can paste in. Label this
+     clearly as a SUGGESTION, not an action you will take.
+6. **If inconclusive** — name the specific files and `sequence` numbers to read next.
 
 Prefer the deterministic fields (`status`, `error_phase`, `retry_counters`, escalation
 `reason`, gate/routing `detail`) before interpreting any free-text. Be selective — read
