@@ -1,5 +1,5 @@
 Create a new codeforge project. `$ARGUMENTS` is `<name> [stack]` where `stack` is optional
-and defaults to `python`. Supported stacks: `python`, `nextjs-supabase`.
+and defaults to `python`. Supported stacks: `python`, `nextjs`, `nextjs-supabase`.
 
 Parse `$ARGUMENTS`: the first token is `<name>`, the second (if present) is `<stack>`. If the
 stack is omitted, use `python`. If the stack is not one of the supported values, stop and ask.
@@ -54,7 +54,7 @@ Read the chosen profile at
    - Set `stack.profile` to the chosen stack:
      ```yaml
      stack:
-       profile: "<stack>"            # "python" or "nextjs-supabase"
+       profile: "<stack>"            # "python", "nextjs", or "nextjs-supabase"
      ```
    - Set `test_runner.sandbox_image` to the profile's `default_sandbox_image` (leave the other
      `test_runner` fields from the default in place):
@@ -98,8 +98,8 @@ Read the chosen profile at
    `rationale`, `locked`, `record` verbatim from the profile.)
 
 4. Create $PROJECTS_ROOT/<name>/.envrc (direnv loads it for the project root and all
-   subdirs). For **both** stacks include the Anthropic key; for **nextjs-supabase** also add the
-   Supabase placeholders:
+   subdirs). All stacks include the Anthropic key; **nextjs-supabase** also adds Supabase
+   placeholders:
 
    ```bash
    # Per-project environment, auto-loaded by direnv. Paste your real values below.
@@ -120,6 +120,8 @@ Read the chosen profile at
        NEXT_PUBLIC_SUPABASE_ANON_KEY: "${NEXT_PUBLIC_SUPABASE_ANON_KEY}"
        SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY}"
    ```
+
+   For **nextjs** (no Supabase), the `.envrc` only needs `ANTHROPIC_API_KEY`.
 
 5. Create $PROJECTS_ROOT/<name>/codeforge-state/.gitignore containing:
    ```
@@ -149,11 +151,10 @@ Read the chosen profile at
   .envrc
   ```
 
-### nextjs-supabase
+### nextjs
 - Create source dirs: source/app/, source/components/, source/lib/, source/public/.
 - Create a minimal, working Next.js + TypeScript base in source/:
-  - `package.json` — matching the baseline in the profile's coder prompt fragment
-    (`next`, `react`, `react-dom`, `@supabase/supabase-js`; devDeps `typescript`,
+  - `package.json` — (`next`, `react`, `react-dom`; devDeps `typescript`,
     `@types/react`, `@types/node`, `vitest`, `@testing-library/react`,
     `@testing-library/jest-dom`, `jsdom`). Include `"scripts": {"dev":"next dev",
     "build":"next build","test":"vitest run"}`.
@@ -175,7 +176,18 @@ Read the chosen profile at
 Then initialise the source repo on a `main` branch with a base commit (the immutable base
 every run branches from):
 - git -C .../source/ init -b main
-- git -C .../source/ add .gitignore  (plus the scaffolded files for nextjs-supabase)
+- git -C .../source/ add .gitignore (plus the scaffolded files)
+- git -C .../source/ commit -m "chore: initialize repository"
+
+### nextjs-supabase
+- Same as `nextjs` above, but also include `@supabase/supabase-js` in `dependencies`.
+- source/.gitignore: same as nextjs.
+- Run `npm install` in source/.
+
+Then initialise the source repo on a `main` branch with a base commit (the immutable base
+every run branches from):
+- git -C .../source/ init -b main
+- git -C .../source/ add .gitignore (plus the scaffolded files)
 - git -C .../source/ commit -m "chore: initialize repository"
 
 ---
@@ -192,13 +204,13 @@ Print:
 ✓ Config seeded from installation defaults (full copy, ready to customize); stack.profile + sandbox_image (<default_sandbox_image>) + repos block set
 ✓ .envrc created at project root (.gitignore'd in both repos)
 ```
-For nextjs-supabase also note: `✓ Next.js + TypeScript base scaffolded; npm install run`.
+For nextjs and nextjs-supabase also note: `✓ Next.js + TypeScript base scaffolded; npm install run`.
 
 Then list manual steps still required:
   • Add your key to $PROJECTS_ROOT/<name>/.envrc:
       export ANTHROPIC_API_KEY="sk-ant-..."
     then run `direnv allow` in the project root. (required — the run fails to start without it)
-  • For nextjs-supabase: create a Supabase project and paste its URL + anon key + service-role
+  • For nextjs-supabase only: create a Supabase project and paste its URL + anon key + service-role
     key into the same .envrc (required for runtime; tests mock Supabase so they pass without it).
   • Pull the sandbox image so test runs work: `docker pull <default_sandbox_image>`.
   • For pushing / opening PRs (not needed for local test runs):
