@@ -16,7 +16,7 @@ import json
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import typer
 
@@ -32,7 +32,14 @@ from codeforge.cli.interaction import HumanInteraction
 from codeforge.cli.lock import CodeforgeAlreadyRunningError, CodeforgeLock
 from codeforge.config.config_loader import load_config
 from codeforge.orchestrator.state_machine import EscalationError, StateMachine
-from codeforge.schemas.contracts import CodeforgeRun, CommitWriterInput, EscalationEvent
+from codeforge.schemas.contracts import (
+    CodeforgeRun,
+    CommitWriterInput,
+    EscalationEvent,
+    EscalationResolution,
+    ReentryDirective,
+    ReentryState,
+)
 
 app = typer.Typer(
     name="codeforge",
@@ -51,8 +58,8 @@ _CODEFORGE_CONFIG_TEMPLATE = """\
 # Merge rules: all keys here override the codeforge installation defaults.
 # You only need to set fields that differ from the defaults.
 
-# Target tech stack. "python" (default) or "nextjs-supabase". The profile supplies a default
-# sandbox image when test_runner.sandbox_image is left blank.
+# Target tech stack. "python" (default), "nextjs", or "nextjs-supabase". The profile
+# supplies a default sandbox image when test_runner.sandbox_image is left blank.
 stack:
   profile: "python"
 
@@ -219,6 +226,101 @@ def _do_commit(
 
 
 # ---------------------------------------------------------------------------
+# list-runs helper
+# ---------------------------------------------------------------------------
+
+def _read_run_summary(run_log_dir: Path, run_id: str) -> dict[str, Any] | None:
+    """Read a single run's summary from disk. Returns None if the run is unreadable."""
+    run_dir = run_log_dir / run_id
+    run_file = run_dir / "codeforge_run.json"
+    if not run_file.exists():
+        return None
+    try:
+        data: dict[str, Any] = json.loads(run_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    brief_file = run_dir / "brief.txt"
+    brief = brief_file.read_text(encoding="utf-8").strip() if brief_file.exists() else None
+
+    # Surface the reason for the latest unresolved escalation, if any.
+    escalation_reason: str | None = None
+    escalations = data.get("escalations") or []
+    if escalations:
+        latest = escalations[-1]
+        if not latest.get("resolved"):
+            escalation_reason = latest.get("reason")
+
+    return {
+        "run_id": data.get("run_id", run_id),
+        "status": data.get("status"),
+        "started_at": data.get("started_at"),
+        "run_mode": data.get("run_mode"),
+        "brief": brief,
+        "escalation_reason": escalation_reason,
+        "agent_call_count": data.get("agent_call_count"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive resume helper
+# ---------------------------------------------------------------------------
+
+def _build_noninteractive_resolution(
+    decision: str,
+    reentry_state: Optional[str],
+    reset_counters: Optional[str],
+    instructions: Optional[str],
+    notes: Optional[str],
+    suggested_reentry: Optional[str],
+) -> "EscalationResolution":
+    """Build an EscalationResolution from CLI flags without prompting."""
+    decision = decision.lower().strip()
+    if decision not in ("approve", "reject", "modify"):
+        typer.echo(f"--decision must be approve, reject, or modify (got: {decision!r})", err=True)
+        raise typer.Exit(1)
+
+    if decision == "reject":
+        return EscalationResolution(outcome="rejected", human_notes=notes or "")
+
+    state = reentry_state or suggested_reentry
+    if not state:
+        typer.echo(
+            "--reentry-state is required for approve/modify "
+            "(no suggested state found in escalation).",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    counter_list: list[str] = []
+    if reset_counters:
+        counter_list = [c.strip() for c in reset_counters.split(",") if c.strip()]
+
+    directive = ReentryDirective(
+        reentry_state=cast(ReentryState, state),
+        counter_resets=counter_list,
+        reset_global_ceiling=False,
+    )
+
+    if decision == "modify":
+        if not instructions:
+            typer.echo("--instructions is required for --decision modify.", err=True)
+            raise typer.Exit(1)
+        return EscalationResolution(
+            outcome="modified",
+            change_summary=instructions,
+            reentry_directive=directive,
+            human_notes=notes or "",
+        )
+
+    return EscalationResolution(
+        outcome="approved",
+        reentry_directive=directive,
+        human_notes=notes or "",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
@@ -351,6 +453,36 @@ def resume(
         help="Path to the managed project directory.",
         show_default=False,
     ),
+    decision: Optional[str] = typer.Option(
+        None,
+        "--decision",
+        help="Non-interactive: approve, reject, or modify. Skips all prompts.",
+        show_default=False,
+    ),
+    reentry_state: Optional[str] = typer.Option(
+        None,
+        "--reentry-state",
+        help="Non-interactive: reentry state name (required for approve/modify).",
+        show_default=False,
+    ),
+    reset_counters: Optional[str] = typer.Option(
+        None,
+        "--reset-counters",
+        help="Non-interactive: comma-separated retry counter names to reset to zero.",
+        show_default=False,
+    ),
+    instructions: Optional[str] = typer.Option(
+        None,
+        "--instructions",
+        help="Non-interactive (modify only): description of the change being made.",
+        show_default=False,
+    ),
+    notes: Optional[str] = typer.Option(
+        None,
+        "--notes",
+        help="Non-interactive: human notes attached to the resolution.",
+        show_default=False,
+    ),
 ) -> None:
     """
     Resume a codeforge run that was interrupted by an escalation.
@@ -358,6 +490,11 @@ def resume(
     Loads the saved CodeforgeRun, presents the pending escalation event to
     the operator, collects their EscalationResolution, and re-enters the
     state machine from the chosen reentry state.
+
+    Pass --decision to skip all interactive prompts (for programmatic / web use):
+      --decision approve --reentry-state <state>
+      --decision reject
+      --decision modify --reentry-state <state> --instructions "change X to Y"
     """
     config = _load_config_or_exit(project_dir)
     lock = CodeforgeLock(project_dir)
@@ -389,8 +526,18 @@ def resume(
         escalation, needs_prompt = _select_resume_escalation(codeforge_run)
         freshly_resolved = False
         if escalation is not None and needs_prompt:
-            typer.echo(f"\nResuming run {run_id} — pending escalation:")
-            resolution = human.handle_escalation(escalation)
+            if decision is not None:
+                resolution = _build_noninteractive_resolution(
+                    decision=decision,
+                    reentry_state=reentry_state,
+                    reset_counters=reset_counters,
+                    instructions=instructions,
+                    notes=notes,
+                    suggested_reentry=getattr(escalation, "suggested_reentry_state", None),
+                )
+            else:
+                typer.echo(f"\nResuming run {run_id} — pending escalation:")
+                resolution = human.handle_escalation(escalation)
 
             if resolution.outcome == "rejected":
                 typer.echo("Escalation rejected — aborting run.", err=True)
@@ -478,6 +625,42 @@ def resume(
 
     finally:
         lock.release()
+
+
+@app.command("list-runs")
+def list_runs(
+    project_dir: Path = typer.Option(
+        ...,
+        "--project-dir",
+        "-d",
+        help="Path to the managed project directory.",
+        show_default=False,
+    ),
+) -> None:
+    """
+    List all runs for a project, ordered newest first.
+
+    Outputs a JSON array to stdout. Each element contains:
+      run_id, status, started_at, run_mode, brief, escalation_reason, agent_call_count
+
+    escalation_reason is non-null only when the latest escalation is unresolved
+    (i.e. the run is awaiting a resume decision).
+    """
+    run_log_dir = _run_log_dir(project_dir)
+    if not run_log_dir.exists():
+        typer.echo("[]")
+        return
+
+    summaries: list[dict[str, Any]] = []
+    for entry in run_log_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        summary = _read_run_summary(run_log_dir, entry.name)
+        if summary is not None:
+            summaries.append(summary)
+
+    summaries.sort(key=lambda s: s.get("started_at") or "", reverse=True)
+    typer.echo(json.dumps(summaries, indent=2))
 
 
 # ---------------------------------------------------------------------------

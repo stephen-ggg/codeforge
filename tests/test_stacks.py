@@ -32,7 +32,7 @@ from codeforge.stacks.registry import available_profiles, get_profile
 # --- Registry / profile ----------------------------------------------------
 
 def test_both_builtin_profiles_present() -> None:
-    assert set(available_profiles()) == {"python", "nextjs-supabase"}
+    assert set(available_profiles()) == {"python", "nextjs-supabase", "nextjs"}
 
 
 def test_unknown_profile_raises_with_known_list() -> None:
