@@ -170,14 +170,23 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def _load_envrc(project_dir: Path) -> dict[str, str]:
-    """Parse simple `export KEY=VALUE` lines from the project's .envrc file.
+    """Parse simple `export KEY=VALUE` lines from the nearest .envrc file.
 
-    Only handles the subset written by codeforge's project init — bare shell
-    syntax, string interpolation, and command substitution are not evaluated.
+    Walks up from project_dir toward the filesystem root, mirroring how direnv
+    locates its .envrc. Only handles bare export statements — shell interpolation
+    and command substitution are not evaluated.
     """
-    envrc = project_dir / ".envrc"
-    if not envrc.exists():
+    search = project_dir.resolve()
+    envrc: Path | None = None
+    for candidate in [search, *search.parents]:
+        p = candidate / ".envrc"
+        if p.exists():
+            envrc = p
+            break
+
+    if envrc is None:
         return {}
+
     env: dict[str, str] = {}
     for raw in envrc.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
