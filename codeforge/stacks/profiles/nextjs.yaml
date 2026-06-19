@@ -1,0 +1,50 @@
+# Next.js profile (TypeScript, no external database).
+# One project = the whole app: React UI + API routes on a single Node toolchain
+# (one package.json, one install, one type-check gate, one vitest run).
+# Use this profile when the app has no Supabase/Postgres dependency.
+# Use nextjs-supabase when you need a managed database.
+id: "nextjs"
+language_label: "TypeScript (Next.js App Router)"
+
+default_sandbox_image: "node:20-bookworm"
+manifest_filename: "package.json"
+manifest_required: true
+
+install_commands:
+  - "npm ci || npm install"
+test_manifest_filename: null
+test_install_commands: []
+
+build_commands:
+  - "npx --no-install tsc --noEmit"
+
+test_command: "npx --no-install vitest run --reporter=junit --outputFile=results.xml"
+results_path: "/workspace/results.xml"
+workdir: "/workspace"
+
+source_globs:
+  - "app/**"
+  - "components/**"
+  - "lib/**"
+  - "src/**"
+  - "public/**"
+  - "package.json"
+  - "tsconfig.json"
+  - "next.config.mjs"
+  - "vitest.config.ts"
+
+runtime_version_regex: "v(\\d+\\.\\d+\\.\\d+)"
+
+seed_tech_decisions:
+  - id: "TD-001"
+    domain: "language"
+    decision: "TypeScript (strict) throughout."
+    rationale: "Project stack profile: nextjs."
+    locked: true
+    record: true
+  - id: "TD-002"
+    domain: "framework"
+    decision: "Next.js (App Router): React UI under app/ + components/, backend as Route Handlers under app/api/**/route.ts."
+    rationale: "Single toolchain delivers UI and API in one project; codeforge maintains the frontend↔API contract."
+    locked: true
+    record: true
