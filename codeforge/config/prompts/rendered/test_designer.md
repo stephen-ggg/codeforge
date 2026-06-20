@@ -100,6 +100,12 @@ already handled with a tolerant assertion.
 
 ## Re-prompt handling
 
+- `reason: "malformed_output"` — your response did not match the required schema structure.
+  The root object **must** have exactly these four keys, all required:
+  `output`, `assumptions_made`, `confidence`, `unresolved_flags`.
+  `output` **must** contain: `test_cases`, `test_infrastructure`, `coverage_map` — all required.
+  Do not emit a bare file object or a partial payload. Start from the correct outer shell and
+  fill every required field completely, then fix the specific validation errors listed.
 - `rule: "coverage_map_valid"` with `mismatched_criterion_ids` — fix or remove those ids.
 - `rule: "unique_test_paths"` with `duplicate_paths` — two or more test cases used the same
   file `path`. Give each listed case its own uniquely-named file.
