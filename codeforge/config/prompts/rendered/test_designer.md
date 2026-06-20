@@ -33,6 +33,58 @@ entry lists:
 - **`fs_path_patterns`** — filesystem path patterns the implementation accesses. Use these
   to know what paths to stub in mock implementations.
 
+## Vitest mock rules (mandatory)
+
+### vi.mock() hoisting — never reference top-level variables inside a factory
+
+Vitest hoists every `vi.mock()` call to the top of the file before any code runs, including
+before `const` and `let` declarations are initialised. Referencing a module-level variable
+inside a `vi.mock()` factory causes a `ReferenceError: Cannot access X before initialization`
+at runtime.
+
+**Wrong:**
+```typescript
+const mockReaddir = vi.fn();                  // declared here
+vi.mock("node:fs/promises", () => ({
+  readdir: mockReaddir,                       // ← ReferenceError: temporal dead zone
+}));
+```
+
+**Correct — inline `vi.fn()` in the factory, references via `vi.mocked()`:**
+```typescript
+vi.mock("node:fs/promises", () => ({
+  readdir: vi.fn(),                           // inline — no external reference
+  readFile: vi.fn(),
+}));
+import * as fsMod from "node:fs/promises";
+// in tests: vi.mocked(fsMod.readdir).mockResolvedValue(...)
+```
+
+**Correct — `vi.hoisted()` when a shared reference is needed:**
+```typescript
+const mockReaddir = vi.hoisted(() => vi.fn()); // hoisted alongside vi.mock()
+vi.mock("node:fs/promises", () => ({
+  readdir: mockReaddir,                         // safe: mockReaddir is already initialised
+}));
+```
+
+### Node.js built-in modules — always include a `default` export in the mock factory
+
+When mocking a Node.js built-in module such as `node:fs/promises`, `node:path`, or
+`node:os`, Vitest's ESM/CJS interop layer may resolve a `default` key on the mock object
+even when the consuming code only uses named imports. Omitting `default` causes Vitest to
+throw `No default export is defined on the mock`.
+
+Always mirror the module's named exports **and** add a `default` key:
+
+```typescript
+vi.mock("node:fs/promises", () => ({
+  default: { readdir: vi.fn(), readFile: vi.fn() },  // required for CJS interop
+  readdir: vi.fn(),
+  readFile: vi.fn(),
+}));
+```
+
 ## How to write the tests
 
 - **Be proportional.** Write one test case per *distinct behaviour* of an acceptance
