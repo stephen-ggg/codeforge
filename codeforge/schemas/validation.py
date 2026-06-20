@@ -275,7 +275,16 @@ class OutputValidator:
                 )
                 if manifest_file:
                     try:
-                        pkg = json.loads(manifest_file.content)
+                        # For modified files the coder puts changes in edits[] rather
+                        # than rewriting content, so apply edits before checking.
+                        from codeforge.store.edits import apply_edits, EditError  # noqa: PLC0415
+                        resolved = manifest_file.content
+                        if manifest_file.change_type == "modified" and manifest_file.edits:
+                            try:
+                                resolved = apply_edits(resolved, manifest_file.edits)
+                            except EditError:
+                                pass  # unapplicable edits are caught by the structural validator
+                        pkg = json.loads(resolved)
                         scripts = pkg.get("scripts", {})
                         if "dev" not in scripts:
                             return False, self._make_violation(

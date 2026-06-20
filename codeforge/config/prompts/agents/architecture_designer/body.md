@@ -39,7 +39,8 @@ output object until every step is done.
 4. **Specify interface contracts precisely.** The Test Designer will write tests from your
    interfaces *alone*, never seeing the code. A vague `contract` forces it to guess and
    wastes a full test loop. Populate `contract` per the rules below so a test can be written
-   against it without ambiguity.
+   against it without ambiguity — including the exact value of any user-visible string or
+   display format that a must AC asserts.
 5. **Continuation mode: produce a diff, not a rewrite.** If `architecture` is present, you
    are extending an existing system. Reference existing modules by exact name, preserve
    stable interface names and contracts unless you are making a deliberate breaking change,
@@ -81,6 +82,16 @@ against blind. Populate it according to `kind`:
 The `module`/`symbol` pair you specify for a `function` interface is the contract the Coder
 must implement to (a file at `module` defining a top-level `symbol`) and the Test Designer
 will import from (`from <module> import <symbol>`). Make both concrete.
+
+**Observable behaviour must be pinned, not implied.** Whenever a must-priority AC asserts a
+user-visible string or a specific display format — an empty-state or error message, a label,
+a date/number rendering, a sort order — write the exact expected value into the relevant
+interface `contract` (e.g. the literal empty-state text, or whether `started_at` is rendered
+as raw ISO-8601 vs a formatted date). The Test Designer asserts against the contract blind; if
+the expected string or format lives only in the implementation, it must guess — and either
+writes a brittle test or cannot test the AC at all. If the requirements leave the exact value
+open, choose a concrete value, record it in the contract, and note the decision in
+`assumptions_made` — do not leave it unspecified.
 
 ## The criteria_coverage gate
 

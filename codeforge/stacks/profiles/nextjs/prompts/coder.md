@@ -22,7 +22,11 @@ vitest.config.ts          ← emit on a new project (jsdom env + @vitejs/plugin-
   Tests import `import { createCard } from "@/lib/cards"` (the `@/` alias maps to repo root).
 - **`http_endpoint` interfaces** map to `app/api/<name>/route.ts` exporting the HTTP method
   handler(s). Validate request bodies; return `NextResponse.json(...)` with the contract's
-  status codes.
+  status codes. **Always declare the request parameter** in the handler signature —
+  `export async function GET(request: Request)` (or `NextRequest`) — even when the handler
+  ignores it and reads only the environment or filesystem. Tests are written blind and
+  invoke handlers by constructing a `Request` and passing it; a zero-parameter `GET()`
+  makes that call a TypeScript error (TS2554) and fails the whole suite at the build phase.
 
 ### Dependency manifest
 

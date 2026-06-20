@@ -169,6 +169,39 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def _load_envrc(project_dir: Path) -> dict[str, str]:
+    """Parse simple `export KEY=VALUE` lines from the nearest .envrc file.
+
+    Walks up from project_dir toward the filesystem root, mirroring how direnv
+    locates its .envrc. Only handles bare export statements — shell interpolation
+    and command substitution are not evaluated.
+    """
+    search = project_dir.resolve()
+    envrc: Path | None = None
+    for candidate in [search, *search.parents]:
+        p = candidate / ".envrc"
+        if p.exists():
+            envrc = p
+            break
+
+    if envrc is None:
+        return {}
+
+    env: dict[str, str] = {}
+    for raw in envrc.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line.startswith("export "):
+            continue
+        kv = line[len("export "):]
+        if "=" not in kv:
+            continue
+        key, _, value = kv.partition("=")
+        value = value.strip().strip('"').strip("'")
+        if key.strip():
+            env[key.strip()] = value
+    return env
+
+
 def load_config(
     project_dir: str | Path,
     *,
@@ -233,10 +266,11 @@ def load_config(
             "Both codeforge_state.remote and source_code.remote are required."
         )
 
-    # 7. Read required env vars
+    # 7. Read required env vars — project .envrc takes precedence over shell environment
+    project_env = _load_envrc(project_dir)
     if require_env_vars:
-        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        github_token = os.environ.get("PIPELINE_GITHUB_TOKEN", "")
+        anthropic_key = project_env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+        github_token = project_env.get("PIPELINE_GITHUB_TOKEN") or os.environ.get("PIPELINE_GITHUB_TOKEN", "")
 
         missing = []
         if not anthropic_key:
@@ -253,8 +287,8 @@ def load_config(
         snapshot.anthropic_api_key = anthropic_key
         snapshot.github_token = github_token
     else:
-        snapshot.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        snapshot.github_token = os.environ.get("PIPELINE_GITHUB_TOKEN", "")
+        snapshot.anthropic_api_key = project_env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+        snapshot.github_token = project_env.get("PIPELINE_GITHUB_TOKEN") or os.environ.get("PIPELINE_GITHUB_TOKEN", "")
 
     return snapshot
 

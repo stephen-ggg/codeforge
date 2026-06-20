@@ -89,6 +89,7 @@ One module per architectural module.
 
 - `rule: "requirements_txt_present"` — add the dependency manifest file.
 - `rule: "ac_coverage_must"` with `uncovered_ac_ids` — implement and declare those ACs.
+- `rule: "package_json_dev_script"` — `package.json` is missing `"dev": "next dev"` in `scripts`. For a `change_type: "new"` file add it directly to `content`; for a `change_type: "modified"` file add it via an `edits[]` entry.
 
 ## What you must NOT do
 

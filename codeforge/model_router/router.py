@@ -248,7 +248,7 @@ class ModelRouter:
         tool_executor: Any | None = None,
     ) -> RouterResult:
         """Single completion, or a read-only tool loop when tools are supplied."""
-        kwargs = self._build_kwargs(model, messages, temperature, max_tokens, metadata, thinking_param)
+        kwargs = self._build_kwargs(model, messages, temperature, max_tokens, metadata, thinking_param, self._config.anthropic_api_key)
 
         if tools and tool_executor is not None:
             return self._run_tool_loop(kwargs, model, agent_id, tools, tool_executor)
@@ -309,6 +309,13 @@ class ModelRouter:
             "Router(stream): agent=%s model=%s call_id=%s thinking=%s tokens=%s",
             agent_id, model, litellm_call_id, "yes" if thinking else "no", usage,
         )
+
+        if truncated:
+            logger.warning(
+                "Router(stream): agent=%s finish_reason=length content=%d bytes tokens=%s"
+                " — may be genuine truncation or transient API error; routing through gate",
+                agent_id, len(json_text.encode()), usage,
+            )
 
         return RouterResult(
             content=json_text,
@@ -379,6 +386,7 @@ class ModelRouter:
         max_tokens: int,
         metadata: dict[str, str],
         thinking_param: dict[str, Any] | None,
+        api_key: str = "",
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -386,6 +394,8 @@ class ModelRouter:
             "max_tokens": max_tokens,
             "metadata": metadata,
         }
+        if api_key:
+            kwargs["api_key"] = api_key
         if thinking_param is not None:
             kwargs["thinking"] = thinking_param
             # Anthropic requires temperature=1 for extended thinking; omit if model
@@ -453,10 +463,6 @@ class ModelRouter:
         text, thinking = self._extract_content(raw_content, message)
         json_text = self._extract_json(text)
 
-        # finish_reason == "length" means the model hit max_tokens and the response is
-        # truncated mid-output — the JSON will not parse. Surface it as a distinct signal
-        # so the orchestrator can escalate with a clear reason instead of burning
-        # malformed_output re-prompts that just re-truncate at the same ceiling.
         truncated = getattr(choice, "finish_reason", None) == "length"
 
         litellm_call_id = self._call_id(response)
@@ -466,6 +472,13 @@ class ModelRouter:
             "Router: agent=%s model=%s call_id=%s thinking=%s tokens=%s",
             agent_id, model, litellm_call_id, "yes" if thinking else "no", usage,
         )
+
+        if truncated:
+            logger.warning(
+                "Router: agent=%s finish_reason=length content=%d bytes tokens=%s"
+                " — may be genuine truncation or transient API error; routing through gate",
+                agent_id, len(json_text.encode()), usage,
+            )
 
         return RouterResult(
             content=json_text,
@@ -515,9 +528,26 @@ class ModelRouter:
             s = re.sub(r"\n?```$", "", s).strip()
         if s.startswith("{") and s.endswith("}"):
             return s
+        # Walk character-by-character, skipping string literals so that braces
+        # inside JSON string values (e.g. embedded source code) don't corrupt
+        # the depth counter.
         depth, start, last = 0, None, None
-        for i, ch in enumerate(s):
-            if ch == "{":
+        i = 0
+        n = len(s)
+        while i < n:
+            ch = s[i]
+            if ch == '"' and depth > 0:
+                # Skip over a JSON string literal, honouring backslash escapes.
+                i += 1
+                while i < n:
+                    c = s[i]
+                    if c == "\\":
+                        i += 2  # skip escaped character
+                        continue
+                    if c == '"':
+                        break
+                    i += 1
+            elif ch == "{":
                 if depth == 0:
                     start = i
                 depth += 1
@@ -525,4 +555,5 @@ class ModelRouter:
                 depth -= 1
                 if depth == 0 and start is not None:
                     last = s[start:i + 1]
+            i += 1
         return last if last is not None else s

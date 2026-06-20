@@ -171,6 +171,11 @@ def test_no_tools_path_is_single_shot(monkeypatch, minimal_config: ConfigSnapsho
     def fake_completion(**kwargs):
         calls["n"] += 1
         assert "tools" not in kwargs
+        if kwargs.get("stream"):
+            return iter([
+                _chunk(content='{"output": {}, "confidence": 1.0}'),
+                _chunk(finish_reason="stop", call_id="solo"),
+            ])
         return _response(_msg('{"output": {}, "confidence": 1.0}'), "solo")
 
     monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
