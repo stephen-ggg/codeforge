@@ -1464,6 +1464,7 @@ class StateMachine:
 
         spec_gap_context: dict[str, Any] | None = None
         code_fix_context: dict[str, Any] | None = None
+        test_fix_context: dict[str, Any] | None = None
         env_fix_context: dict[str, Any] | None = None
         dep_fix_context: dict[str, Any] | None = None
         req_doc: RequirementsDoc | None = None
@@ -1543,10 +1544,12 @@ class StateMachine:
                 test_suite = self.run_test_design(
                     req_doc, arch_doc, prompts["test_designer"],
                     code_fix_context=code_fix_context,
+                    retry_context=test_fix_context,
                     env_fix_context=env_fix_context,
                 )
-                code_fix_context = None  # consumed; clear after test design completes
-                env_fix_context = None   # consumed; clear after test design completes
+                code_fix_context = None   # consumed; clear after test design completes
+                test_fix_context = None   # consumed; clear after test design completes
+                env_fix_context = None    # consumed; clear after test design completes
                 next_state = "test_execution"
 
             elif next_state == "test_execution":
@@ -1647,6 +1650,7 @@ class StateMachine:
                     self._apply_outcome(outcome)
                     if outcome.decision == "escalate":
                         self._escalate(outcome.escalation_reason or "max_retries_exceeded")
+                    test_fix_context = _build_test_fix_context(analysis, test_suite)
                     next_state = "test_design"
 
                 elif verdict == "fail_spec_gap":
@@ -1805,6 +1809,43 @@ def _build_code_fix_context(
     for tc_id in failed_tc_ids:
         flagged.update(tc_map.get(tc_id, []))
     return {"flagged_criterion_ids": sorted(flagged)}
+
+
+def _build_test_fix_context(
+    analysis: "TestAnalysis", test_suite: "TestSuite"
+) -> dict[str, Any]:
+    """
+    Build the retry_context dict passed back to the test_designer after a fail_test_bug verdict.
+
+    Firewall-safe whitelist projection — includes only the analyst's recommended_action and
+    evidence for test_bug failures, plus the path of each affected test file so the designer
+    knows which cases to revise. Never forwards code, the raw test_analysis artifact, or any
+    implementation detail.
+    """
+    failed_tc_ids = {
+        fa.test_case_id
+        for fa in analysis.failure_analyses
+        if fa.root_cause_hypothesis == "test_bug"
+    }
+    tc_paths: dict[str, list[str]] = {
+        tc.id: [code.path for code in tc.code]
+        for tc in test_suite.test_cases
+    }
+    failed_cases = [
+        {
+            "test_case_id": fa.test_case_id,
+            "file_paths": tc_paths.get(fa.test_case_id, []),
+            "recommended_action": fa.recommended_action,
+            "evidence": fa.evidence,
+        }
+        for fa in analysis.failure_analyses
+        if fa.root_cause_hypothesis == "test_bug"
+    ]
+    return {
+        "trigger": "test_bug",
+        "test_summary": analysis.summary,
+        "failed_test_cases": failed_cases,
+    }
 
 
 def _build_spec_gap_context(analysis: "TestAnalysis") -> dict[str, Any]:
