@@ -1,3 +1,6 @@
+# Project-local codeforge configuration for "codeforge-dashboard".
+# Full copy of the installation defaults — edit any field to customize this project.
+# This file is deep-merged over codeforge/config/codeforge.config.yaml at load time.
 name: "codeforge-v1"
 schema_version: "1.0.0"
 
@@ -56,7 +59,8 @@ agents:
   requirements_analyst:
     model: "claude-sonnet-4-6"
     temperature: 0.3
-    max_tokens: 8192
+    max_tokens: 16000
+    streaming: true 
     system_prompt: "prompts/rendered/requirements_analyst.md"
     metadata:
       agent_id: "requirements_analyst"
@@ -65,10 +69,10 @@ agents:
   architecture_designer:
     model: "claude-sonnet-4-6"
     temperature: 1            # required when thinking is enabled
-    max_tokens: 16000         # must exceed thinking.budget_tokens (8000)
+    max_tokens: 64000         # must exceed thinking.budget_tokens (8000)
     thinking:
       enabled: true
-      budget_tokens: 8000
+      budget_tokens: 32000
     streaming: true           # stream chunks to avoid HTTP timeout on long outputs
     system_prompt: "prompts/rendered/architecture_designer.md"
     metadata:
@@ -78,12 +82,8 @@ agents:
   coder:
     model: "claude-opus-4-8"
     temperature: 0.2
-    # 16000 is the safe non-streaming ceiling for this agent (streaming is off here,
-    # so litellm is called without stream=True; larger values risk SDK HTTP timeouts).
-    # The coder emits whole files inline, so 8192 truncated mid-JSON on multi-file
-    # features. To go higher (opus-4-8 supports 128K) set `streaming: true` on this
-    # agent — the router streams per-agent when that flag is enabled.
-    max_tokens: 16000
+    max_tokens: 64000
+    streaming: true
     system_prompt: "prompts/rendered/coder.md"
     metadata:
       agent_id: "coder"
@@ -92,10 +92,10 @@ agents:
   code_reviewer:
     model: "claude-sonnet-4-6"
     temperature: 1            # required when thinking is enabled
-    max_tokens: 12000         # must exceed thinking.budget_tokens (6000)
+    max_tokens: 24000         # must exceed thinking.budget_tokens (6000)
     thinking:
       enabled: true
-      budget_tokens: 6000
+      budget_tokens: 12000
     system_prompt: "prompts/rendered/code_reviewer.md"
     metadata:
       agent_id: "code_reviewer"
@@ -104,10 +104,10 @@ agents:
   security_reviewer:
     model: "claude-sonnet-4-6"
     temperature: 1            # required when thinking is enabled
-    max_tokens: 12000         # must exceed thinking.budget_tokens (6000)
+    max_tokens: 24000         # must exceed thinking.budget_tokens (6000)
     thinking:
       enabled: true
-      budget_tokens: 6000
+      budget_tokens: 12000
     system_prompt: "prompts/rendered/security_reviewer.md"
     metadata:
       agent_id: "security_reviewer"
@@ -116,7 +116,8 @@ agents:
   test_designer:
     model: "claude-sonnet-4-6"
     temperature: 0.1
-    max_tokens: 16000         # non-streaming-safe ceiling; router does not stream
+    max_tokens: 64000         
+    streaming: true           # stream chunks to avoid HTTP timeout on long outputs
     system_prompt: "prompts/rendered/test_designer.md"
     metadata:
       agent_id: "test_designer"
@@ -125,11 +126,11 @@ agents:
   test_analyst:
     model: "claude-sonnet-4-6"
     temperature: 1            # required when thinking is enabled
-    max_tokens: 16000         # must exceed thinking.budget_tokens (10000)
+    max_tokens: 64000         # must exceed thinking.budget_tokens (10000)
+    streaming: true           # stream chunks to avoid HTTP timeout on long outputs
     thinking:
       enabled: true
-      budget_tokens: 10000
-    streaming: true           # stream chunks to avoid HTTP timeout on long outputs
+      budget_tokens: 32000
     system_prompt: "prompts/rendered/test_analyst.md"
     metadata:
       agent_id: "test_analyst"
