@@ -1,12 +1,14 @@
-Investigate a codeforge run and produce a structured diagnosis with a recommended next step.
+Investigate a codeforge run and produce a structured diagnosis with a source-level fix recommendation.
 
 Arguments: $ARGUMENTS — a run id, plus an OPTIONAL project name or run-dir path.
 Examples: `run-7a84ce2311b0`, `run-7a84ce2311b0 release-notes`,
 `run-7a84ce2311b0 /home/sabbamonte/projects/release-notes/codeforge-state/run-logs/run-7a84ce2311b0`.
 
 This is a READ-ONLY investigation. Never resume, edit, or run the pipeline. Your job
-is to read the right files in the right order, walk the reference chain, and hand a
-human an accurate starting point — not to dump raw file tails into the report.
+is to read the right files in the right order, walk the reference chain, and identify
+what needs to change in the Codeforge source — a prompt, gate, schema, or agent
+contract — so this class of failure does not recur. Do not suggest one-off reprompts
+or resume instructions; the goal is a fix to the framework.
 
 ## 0. Locate the run
 
@@ -108,32 +110,30 @@ not just the reason label.
 - `human_required` → summarize the pending `human_interaction` and `suggested_reentry_state`.
 - `commit_failure` → focus on the commit-phase routing/gate `detail`.
 
-## 4a. Classify: codeforge bug vs. agent error
+## 4a. Locate the fix target in Codeforge source
 
-Before writing the recommended next step, decide which of these applies:
+Every failure — whether a prompt gap, a missing contract, a schema mismatch, or an
+access-policy hole — maps to a specific file in the Codeforge source tree. Identify it:
 
-**Codeforge bug** (fix the framework, not the agent) — look for:
-- The same gate `rule` fires on two or more retry attempts with identical or near-identical
-  `detail`. A correctly-implemented gate + correctly-prompted agent should not produce the
-  exact same violation twice in a row.
-- A gate fires on a `modified` file but the agent's artifact shows the fix was placed in
-  `edits[]` rather than `content` — the gate may not be applying edits before checking.
-- A gate rule has no corresponding entry in the agent's re-prompt handling section — the
-  agent had no instructions for recovering from that specific violation.
-- The gate `detail` describes a structural contract the agent could not have known about
-  from its prompt (undocumented rule, newly added gate with no prompt update).
+- **Prompt gap** — the agent lacked a rule or example it needed. Fix: the rendered
+  prompt file under `prompts/` (find the template that produces it). The gap is usually
+  one of: a missing enum list, a missing constraint, or a missing worked example.
+- **Gate misconfiguration** — a gate fires on output the agent could not have known was
+  invalid (undocumented rule, newly tightened constraint with no prompt update, or a rule
+  that fires identically on every retry). Fix: either the gate implementation or the
+  prompt that tells the agent how to satisfy it — often both need updating together.
+- **Access/contract gap** — an agent was denied a file it needed, or two agents made
+  incompatible choices because one cannot see the other's output (e.g., test_designer
+  forbidden from reading code_artifact). Fix: the context-package assembly logic or the
+  `allowed_consumers` / `forbidden_consumers` policy for the relevant artifact type, OR
+  add a derived summary artifact that bridges the gap without exposing the full artifact.
+- **Schema mismatch** — the agent's output schema diverges from what downstream
+  consumers or gates expect. Fix: the schema definition and the corresponding prompt
+  section that documents valid values.
 
-**Agent error** (reprompt on resume is the right fix) — look for:
-- Different gate rules fire on each attempt, or the `detail` strings vary meaningfully —
-  the agent is making distinct mistakes, not hitting the same wall.
-- A single attempt fails a gate that is clearly documented in the agent's re-prompt
-  handling section with correct recovery instructions.
-- The artifact shows the agent understood the rule but produced wrong output anyway
-  (wrong field type, missing required value, logic error in generated code).
-
-When the evidence is mixed (some attempts look systemic, others look like agent errors),
-call it a codeforge bug if the final attempt failed the same rule as the first — the
-agent never had a path to succeed.
+In each case, name the Codeforge source path(s) precisely. If you cannot determine the
+path from the run artifacts alone, name the component (e.g., "security_reviewer prompt
+template" or "test_suite artifact schema") and describe what to grep for.
 
 ## 5. Report (inline only — write nothing to disk)
 
@@ -143,17 +143,14 @@ Emit a structured report:
 2. **Where it failed** — the decisive event: `sequence`, row/rule, and quoted `detail`.
 3. **Root cause** — the artifact / flag / raw-output / `error_phase` evidence. Give a
    clickable file path for every artifact you cite so the human can dig further.
-4. **Classification** — state clearly: **Codeforge bug** or **Agent error**, with a
-   one-sentence rationale drawn from step 4a. This determines what kind of fix is needed.
-5. **Recommended next step**:
-   - **Codeforge bug** → name the specific file(s) to fix in the codeforge source
-     (gate implementation, agent prompt, or both) and describe what is wrong. Then
-     SUGGEST a simple `approve` resume (option 1, reentry state + counter reset) *after*
-     the fix is applied — no reprompt needed.
-   - **Agent error** → name the agent that owns the fix and SUGGEST a `modify` resume
-     (option 3) with a concrete change_summary the operator can paste in. Label this
-     clearly as a SUGGESTION, not an action you will take.
-6. **If inconclusive** — name the specific files and `sequence` numbers to read next.
+4. **Fix target** — name the Codeforge source component(s) to change (prompt template,
+   gate, schema, access policy). One component per bullet. For each, describe precisely
+   what is wrong and what the correct behaviour should be.
+5. **If inconclusive** — name the specific files and `sequence` numbers to read next.
+
+Do not suggest resume options, reprompt workarounds, or run-specific patches. The
+output of this investigation is a to-do list for the framework, not instructions for
+salvaging the failed run.
 
 Prefer the deterministic fields (`status`, `error_phase`, `retry_counters`, escalation
 `reason`, gate/routing `detail`) before interpreting any free-text. Be selective — read
