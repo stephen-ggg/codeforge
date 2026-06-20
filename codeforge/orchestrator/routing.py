@@ -491,6 +491,8 @@ def route_test_analysis_code_bug(
             decision="retry_same_agent",
             next_state="coding",
             counter_deltas={"test_loop": 1},
+            # fresh coder invocation — restore its per-invocation re-prompt cushions.
+            counter_resets=["low_confidence_reprompt", "malformed_output"],
         )
     return RoutingOutcome(
         row_id="test_analysis_code_bug_exhausted",
@@ -513,6 +515,9 @@ def route_test_analysis_test_bug(
             decision="retry_same_agent",
             next_state="test_design",
             counter_deltas={"test_loop": 1},
+            # fresh test_designer invocation — restore its per-invocation re-prompt
+            # cushions so a low-confidence/malformed retry isn't denied its one shot.
+            counter_resets=["low_confidence_reprompt", "malformed_output"],
         )
     return RoutingOutcome(
         row_id="test_analysis_test_bug_exhausted",
@@ -535,8 +540,14 @@ def route_test_analysis_spec_gap(
             decision="retry_same_agent",
             next_state="architecture",
             counter_deltas={"test_loop": 1},
-            # spec_gap rule: also reset review loops
-            counter_resets=["code_review_loop", "security_review_loop"],
+            # spec_gap rule: also reset review loops; fresh architecture_designer
+            # invocation — restore its per-invocation re-prompt cushions too.
+            counter_resets=[
+                "code_review_loop",
+                "security_review_loop",
+                "low_confidence_reprompt",
+                "malformed_output",
+            ],
         )
     return RoutingOutcome(
         row_id="test_analysis_spec_gap_exhausted",
