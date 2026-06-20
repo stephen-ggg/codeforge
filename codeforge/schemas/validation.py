@@ -298,6 +298,33 @@ class OutputValidator:
                     except (json.JSONDecodeError, AttributeError):
                         pass  # malformed JSON is caught by the structural validator
 
+            # module_interfaces_no_bodies: each export signature must be a single-line
+            # type declaration (no newlines, ≤ 300 chars). This keeps implementation
+            # detail out of the artifact that test_designer is allowed to read.
+            leaking: list[str] = []
+            for mf in payload.module_interfaces.files:
+                for exp in mf.exports:
+                    if "\n" in exp.signature or len(exp.signature) > 300:
+                        leaking.append(f"{mf.path}::{exp.name}")
+            if leaking:
+                return False, self._make_violation(
+                    rule="module_interfaces_no_bodies",
+                    detail=(
+                        f"module_interfaces contains signatures that appear to include "
+                        f"implementation detail: {', '.join(leaking[:3])}"
+                        f"{'...' if len(leaking) > 3 else ''}. "
+                        "Each signature must be a single-line type declaration only — "
+                        "no function body, no algorithm logic. Resubmit with "
+                        "module_interfaces corrected; all other fields (files, "
+                        "change_summary, criteria_addressed, interface_changes) must "
+                        "be identical to your previous submission."
+                    ),
+                    leaking_signatures=leaking,
+                    attempt_number=attempt_number,
+                    original_input_ref=original_input_ref,
+                    counter="coder_validation",
+                )
+
         # ---- Architecture designer ----
         if agent_id == "architecture_designer" and isinstance(payload, ArchitectureDoc):
             for entry in payload.criteria_coverage:

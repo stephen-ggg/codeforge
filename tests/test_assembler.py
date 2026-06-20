@@ -64,7 +64,7 @@ def assembler_with_code_artifact(project_dir: Path, run_log_dir: Path) -> Contex
     return _make_assembler(
         project_dir,
         run_log_dir,
-        {"files": [], "change_summary": "", "criteria_addressed": [], "interface_changes": []},
+        {"files": [], "module_interfaces": {"files": []}, "change_summary": "", "criteria_addressed": [], "interface_changes": []},
     )
 
 
@@ -105,6 +105,7 @@ def test_assembler_resolves_edits_for_reviewer(
                 "edits": [{"old_string": "x = 1", "new_string": "x = 99"}],
             }
         ],
+        "module_interfaces": {"files": []},
         "change_summary": "bump x",
         "criteria_addressed": [],
         "interface_changes": [],
@@ -136,6 +137,7 @@ def test_assembler_no_source_root_passes_through_raw(
                 "edits": [{"old_string": "x = 1", "new_string": "x = 99"}],
             }
         ],
+        "module_interfaces": {"files": []},
         "change_summary": "bump x",
         "criteria_addressed": [],
         "interface_changes": [],

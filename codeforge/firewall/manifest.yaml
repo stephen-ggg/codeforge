@@ -49,6 +49,12 @@ artifacts:
       - test_designer   # PRIMARY ANTI-CHEAT CONTROL — must never be relaxed
       - test_analyst    # fail_ambiguous → human escalation; no code access exception exists
 
+  module_interfaces:
+    allowed_consumers:
+      - test_designer
+      - test_analyst
+    forbidden_consumers: []
+
   review_report:
     # Raw report never forwarded to any agent — orchestrator extracts findings projection only
     allowed_consumers:

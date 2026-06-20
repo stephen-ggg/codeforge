@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from codeforge.schemas.contracts import CodeArtifact, CodeFile, Edit
+from codeforge.schemas.contracts import CodeArtifact, CodeFile, Edit, ModuleInterfaces
 from codeforge.store.edits import EditError, apply_edits, resolve_code_artifact_edits
 
 
@@ -77,6 +77,7 @@ def test_codefile_allows_edits_on_modified() -> None:
 def _make_artifact(files: list[CodeFile]) -> CodeArtifact:
     return CodeArtifact(
         files=files,
+        module_interfaces=ModuleInterfaces(files=[]),
         change_summary="test",
         criteria_addressed=[],
         interface_changes=[],

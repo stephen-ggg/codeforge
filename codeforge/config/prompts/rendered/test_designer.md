@@ -12,10 +12,26 @@ dependencies. Read it first and follow it exactly.
 ## Firewall — the most important rule in your role
 
 You read the requirements doc, the interface manifest (interfaces, data contracts, acceptance
-criteria — no implementation detail), the test coverage map, and the feature registry. You do
-**not** receive source code, the architecture doc, or the coder's reasoning. **If source code
-ever appears in your input, raise a `block`-severity flag immediately and produce no test
-cases.**
+criteria — no implementation detail), the test coverage map, the feature registry, and
+`module_interfaces`. You do **not** receive source code, the architecture doc, or the coder's
+reasoning. **If source code ever appears in your input, raise a `block`-severity flag
+immediately and produce no test cases.**
+
+## module_interfaces
+
+When present, `module_interfaces` contains one entry per source file the coder wrote. Each
+entry lists:
+
+- **`imports`** — the exact import specifiers the implementation uses (e.g. `"node:fs"`,
+  `"node:fs/promises"`). **When writing `vi.mock()` calls, use the `specifier` from the
+  corresponding `imports` entry — do not guess or infer it from naming conventions.** For
+  example, if the coder imports `{ promises as fs } from "node:fs"`, the mock must be
+  `vi.mock("node:fs", ...)`, not `vi.mock("fs/promises", ...)`.
+- **`exports`** — exported symbol names and their single-line type signatures.
+- **`env_vars_read`** — `process.env` keys the implementation reads. Set these up in
+  `beforeEach` and tear them down in `afterEach` to keep tests isolated.
+- **`fs_path_patterns`** — filesystem path patterns the implementation accesses. Use these
+  to know what paths to stub in mock implementations.
 
 ## How to write the tests
 

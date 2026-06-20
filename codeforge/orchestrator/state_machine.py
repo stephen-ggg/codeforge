@@ -70,6 +70,7 @@ from codeforge.schemas.contracts import (
     AgentId,
     AgentOutput,
     ArchitectureDesignerOutput,
+    ModuleInterfaces,
     ArtifactRef,
     ArtifactType,
     CodeArtifact,
@@ -1053,6 +1054,16 @@ class StateMachine:
             ref = self._store_artifact("code_artifact", "coder", output)
             self.run.artifacts["code_artifact"] = ref
             self._record_assumptions(output, "coder")
+
+            mi_output: AgentOutput[ModuleInterfaces] = AgentOutput(
+                output=code_artifact.module_interfaces,
+                assumptions_made=[],
+                confidence=1.0,
+                unresolved_flags=[],
+            )
+            mi_ref = self._store_artifact("module_interfaces", "coder", mi_output)
+            self.run.artifacts["module_interfaces"] = mi_ref
+
             return code_artifact
 
     # ------------------------------------------------------------------

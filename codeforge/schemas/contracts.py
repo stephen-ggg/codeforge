@@ -64,6 +64,7 @@ ArtifactType = Literal[
     "architecture_doc",
     "interface_manifest",
     "code_artifact",
+    "module_interfaces",
     "review_report",
     "security_report",
     "test_suite",
@@ -137,6 +138,7 @@ GateRule = Literal[
     "unique_test_paths",
     "requirements_txt_present",
     "package_json_dev_script",
+    "module_interfaces_no_bodies",
     "schema_version_match",
     "global_ceiling",
     "locked_tech_decision",
@@ -296,6 +298,7 @@ class ContractViolationRePrompt(BaseModel):
     missing_spec_gap_for: list[str] | None = None
     missing_requirements_txt: bool | None = None
     duplicate_paths: list[str] | None = None
+    leaking_signatures: list[str] | None = None
 
 
 class LowConfidenceRePrompt(BaseModel):
@@ -617,6 +620,30 @@ class Edit(BaseModel):
         return self
 
 
+class ModuleImport(BaseModel):
+    specifier: str
+    named: list[str]
+    default: str | None = None
+
+
+class ModuleExport(BaseModel):
+    name: str
+    kind: Literal["function", "class", "interface", "type", "const", "enum"]
+    signature: str
+
+
+class ModuleFile(BaseModel):
+    path: str
+    imports: list[ModuleImport]
+    exports: list[ModuleExport]
+    env_vars_read: list[str]
+    fs_path_patterns: list[str]
+
+
+class ModuleInterfaces(BaseModel):
+    files: list[ModuleFile]
+
+
 class CodeFile(BaseModel):
     path: str
     content: str                            # full file body for new files (and the empty string when only `edits` apply)
@@ -650,6 +677,7 @@ class CoderInput(BaseModel):
 
 class CodeArtifact(BaseModel):
     files: list[CodeFile]
+    module_interfaces: ModuleInterfaces
     change_summary: str
     criteria_addressed: list[str]           # AC ids
     interface_changes: list[dict[str, Any]] # [{interface_name, change_type, breaking, description}]

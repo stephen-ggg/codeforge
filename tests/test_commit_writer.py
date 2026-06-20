@@ -25,6 +25,7 @@ from codeforge.schemas.contracts import (
     CodeArtifact,
     CodeFile,
     CommitWriterInput,
+    ModuleInterfaces,
     TestCase,
     TestSuite,
 )
@@ -87,6 +88,7 @@ def _source_commit_input() -> CommitWriterInput:
     code_artifact = CodeArtifact(
         files=[CodeFile(path="src/math.py", content="def add(a, b):\n    return a + b\n",
                         language="python", change_type="new")],
+        module_interfaces=ModuleInterfaces(files=[]),
         change_summary="add",
         criteria_addressed=["AC-001"],
         interface_changes=[],

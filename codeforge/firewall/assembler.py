@@ -100,6 +100,7 @@ _ALL_ARTIFACT_TYPES: list[ArtifactType] = [
     "architecture_doc",
     "interface_manifest",
     "code_artifact",
+    "module_interfaces",
     "review_report",
     "security_report",
     "test_suite",

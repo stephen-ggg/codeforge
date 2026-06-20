@@ -86,6 +86,8 @@ class TestDesignerAgent(BaseAgent):
             if "requirements_doc" in artifacts else None,
             "interface_manifest": artifacts["interface_manifest"].model_dump()
             if "interface_manifest" in artifacts else None,
+            "module_interfaces": artifacts["module_interfaces"].model_dump()
+            if "module_interfaces" in artifacts else None,
             "test_coverage_map_md": state.get("test_coverage_map", ""),
             "feature_registry_md": state.get("feature_registry", ""),
             "retry_context": json.loads(state.get("_retry_context", "null")),
