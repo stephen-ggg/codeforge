@@ -16,10 +16,13 @@ Key invariants:
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn, cast
+
+logger = logging.getLogger(__name__)
 
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.firewall.assembler import ContextAssembler, ContextPackage
@@ -35,7 +38,6 @@ from codeforge.orchestrator.routing import (
     route_malformed,
     route_block_flag,
     route_ceiling_exceeded,
-    route_output_truncated,
     route_low_confidence,
     route_low_confidence_reprompt,
     route_requirements_clarify,
@@ -121,9 +123,10 @@ _STACK_FRAGMENT_FOR_AGENT: dict[str, str] = {
 class EscalationError(Exception):
     """Raised when codeforge must escalate to a human."""
 
-    def __init__(self, reason: EscalationReason, context: str = "") -> None:
+    def __init__(self, reason: EscalationReason, context: str = "", phase: str | None = None) -> None:
         self.reason = reason
         self.context = context
+        self.phase = phase
         super().__init__(f"Codeforge escalated: {reason} — {context}")
 
 
@@ -207,12 +210,14 @@ class StateMachine:
 
         manifest = load_manifest()
         self._manifest = manifest
+        repos = self._config.repos
         self._assembler = ContextAssembler(
             manifest=manifest,
             artifact_store=self.artifact_store,
             project_state=self._project_state,
             pending_writes=self._pending,
             run_log_dir=run_log_dir,
+            source_root=Path(repos.source_code.path) if repos and repos.source_code.path else None,
         )
 
         self._event_log.update_run_snapshot(self._run)
@@ -221,6 +226,7 @@ class StateMachine:
     def resume_run(self, run: CodeforgeRun) -> None:
         """Restore state from a persisted CodeforgeRun (codeforge resume command)."""
         self._run = run
+        self._run.config_snapshot = self._config.to_dict()
         run_log_dir = self._run_log_dir / run.run_id
         self._artifact_store = ArtifactStore(run_log_dir)
         self._pending = PendingWrites(self._project_state)
@@ -230,12 +236,14 @@ class StateMachine:
         self._router = ModelRouter(self._config)
         manifest = load_manifest()
         self._manifest = manifest
+        repos = self._config.repos
         self._assembler = ContextAssembler(
             manifest=manifest,
             artifact_store=self.artifact_store,
             project_state=self._project_state,
             pending_writes=self._pending,
             run_log_dir=run_log_dir,
+            source_root=Path(repos.source_code.path) if repos and repos.source_code.path else None,
         )
 
     # ------------------------------------------------------------------
@@ -336,7 +344,7 @@ class StateMachine:
         self.run.escalations.append(event)
         self.run.status = "failed_escalated"
         self.event_log.update_run_snapshot(self.run)
-        raise EscalationError(reason, context)
+        raise EscalationError(reason, context, phase=self._current_phase)
 
     # ------------------------------------------------------------------
     # Agent invocation (with pre/post event emission)
@@ -434,25 +442,12 @@ class StateMachine:
             litellm_call_id=result.litellm_call_id,
         )
 
-        # Truncated output (finish_reason == "length") is terminal: it can't be parsed,
-        # and a re-prompt would re-truncate at the same max_tokens. Persist the partial
-        # response for debugging, emit a self-sufficient gate event, and escalate with a
-        # clear reason rather than letting it masquerade as a generic malformed_output.
         if result.truncated:
-            artifact_id = self.artifact_store.write_raw(result.content, produced_by=agent_id)
-            self.event_log.emit_gate(
-                rule="schema_valid",
-                passed=False,
-                source_agent=typed_actor,
-                counters=self._counters_snap(),
-                detail=(
-                    "output truncated at max_tokens (finish_reason=length) — raise the "
-                    f"agent's max_tokens or reduce the unit of work for '{agent_id}'"
-                ),
-                artifact_ref=artifact_id,
+            logger.warning(
+                "Agent '%s' returned finish_reason=length (%d bytes); "
+                "routing through schema_valid gate for retry eligibility",
+                agent_id, len(result.content.encode()),
             )
-            self._apply_outcome(route_output_truncated())
-            self._escalate("output_truncated", context=artifact_id)
 
         return result.content
 
@@ -1236,9 +1231,14 @@ class StateMachine:
         reprompt: RePromptContext | None = None
 
         while True:
-            # Budget check: test_loop must still have remaining budget
+            # Budget check: test_loop must still have remaining budget.
+            # Use > (strictly greater) so that a counter that was incremented to exactly
+            # the limit by route_test_analysis_* is still allowed one test run; the
+            # routing function is the authoritative decision point and already approved
+            # the cycle. Only fire test_design_exhausted if the counter somehow exceeds
+            # the limit (safety-net for unexpected re-entries).
             test_loop_limit = self._config.to_dict().get("retry_limits", {}).get("test_loop", 2)
-            if self.run.retry_counters.test_loop >= test_loop_limit:
+            if self.run.retry_counters.test_loop > test_loop_limit:
                 outcome = route_test_design_covmap_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 self._escalate(outcome.escalation_reason or "max_retries_exceeded")
@@ -1461,7 +1461,7 @@ class StateMachine:
         test_suite: TestSuite | None = None
         runner_results: Any = None
 
-        if initial_state == "requirements":
+        if initial_state in ("requirements", "requirements_clarification"):
             req_doc = self.run_requirements(human_brief, human_interface, prompts["requirements_analyst"])
             next_state = "architecture"
         else:
@@ -1484,10 +1484,14 @@ class StateMachine:
             # "commit" re-entry skips the phase loop (mapped to "done" below) but still
             # needs code_art + test_suite for run_commit's closing asserts and the CLI's
             # source-code commit.
-            if initial_state in ("test_execution", "commit"):
+            # "test_design" re-entry also needs code_art: test_design is bypassed on
+            # resume so _run_impl_with_reviews never runs, leaving code_art=None. Without
+            # it the subsequent test_execution asserts immediately with a blank error.
+            if initial_state in ("test_design", "test_execution", "commit"):
                 code_data = self._load_artifact_output("code_artifact")
                 if code_data is not None:
                     code_art = CodeArtifact(**code_data)
+            if initial_state in ("test_execution", "commit"):
                 suite_data = self._load_artifact_output("test_suite")
                 if suite_data is not None:
                     test_suite = TestSuite(**suite_data)

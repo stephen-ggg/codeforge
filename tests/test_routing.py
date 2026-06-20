@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from codeforge.orchestrator.routing import (
     route_low_confidence_reprompt,
+    route_test_analysis_code_bug,
     route_test_analysis_recoverable_error,
+    route_test_analysis_spec_gap,
+    route_test_analysis_test_bug,
 )
 from codeforge.schemas.contracts import RetryCounters
 
@@ -19,6 +22,7 @@ _CONFIG = {
         "dependency_repair": 2,
         "environment_repair": 2,
         "low_confidence_reprompt": 1,
+        "test_loop": 2,
     }
 }
 
@@ -82,3 +86,83 @@ def test_low_confidence_reprompt_exhausted_escalates() -> None:
     assert out.decision == "escalate"
     assert out.escalation_reason == "low_confidence"
     assert out.row_id == "low_confidence_reprompt_exhausted"
+
+
+# ----------------------------------------------------------------------
+# test_analysis retries reset the per-invocation re-prompt cushions
+# ----------------------------------------------------------------------
+#
+# Each in-budget test_analysis retry re-invokes a fresh agent task, so the
+# one-shot low_confidence_reprompt / malformed_output budgets must reset —
+# otherwise a budget spent on an earlier pass denies the retry its own shot
+# and it escalates immediately (see run-fd4c4124e356).
+
+def test_test_bug_retry_resets_reprompt_cushions() -> None:
+    out = route_test_analysis_test_bug(RetryCounters(test_loop=0), _CONFIG)
+    assert out.decision == "retry_same_agent"
+    assert out.next_state == "test_design"
+    assert "low_confidence_reprompt" in out.counter_resets
+    assert "malformed_output" in out.counter_resets
+
+
+def test_code_bug_retry_resets_reprompt_cushions() -> None:
+    out = route_test_analysis_code_bug(RetryCounters(test_loop=0), _CONFIG)
+    assert out.next_state == "coding"
+    assert "low_confidence_reprompt" in out.counter_resets
+    assert "malformed_output" in out.counter_resets
+
+
+def test_spec_gap_retry_resets_reprompt_cushions_and_review_loops() -> None:
+    out = route_test_analysis_spec_gap(RetryCounters(test_loop=0), _CONFIG)
+    assert out.next_state == "architecture"
+    # keeps its original review-loop resets …
+    assert "code_review_loop" in out.counter_resets
+    assert "security_review_loop" in out.counter_resets
+    # … and now also restores the per-invocation cushions.
+    assert "low_confidence_reprompt" in out.counter_resets
+    assert "malformed_output" in out.counter_resets
+
+
+# ----------------------------------------------------------------------
+# test_loop budget boundary: the last allowed retry must route onward, not
+# escalate. The routing function is the authoritative decision; the
+# run_test_design entry check must not preemptively block a cycle that the
+# routing function approved (regression guard for the >= vs > off-by-one).
+# With test_loop limit=2 the routing functions should:
+#   counter=0 → route (0 failures used)
+#   counter=1 → route (1 failure used, one more cycle allowed)
+#   counter=2 → escalate (limit exhausted)
+# ----------------------------------------------------------------------
+
+def test_code_bug_routes_at_limit_minus_one() -> None:
+    """Counter at limit-1 must still route to coding, not escalate."""
+    out = route_test_analysis_code_bug(RetryCounters(test_loop=1), _CONFIG)
+    assert out.decision == "retry_same_agent"
+    assert out.next_state == "coding"
+
+
+def test_code_bug_escalates_at_limit() -> None:
+    out = route_test_analysis_code_bug(RetryCounters(test_loop=2), _CONFIG)
+    assert out.decision == "escalate"
+
+
+def test_test_bug_routes_at_limit_minus_one() -> None:
+    out = route_test_analysis_test_bug(RetryCounters(test_loop=1), _CONFIG)
+    assert out.decision == "retry_same_agent"
+    assert out.next_state == "test_design"
+
+
+def test_test_bug_escalates_at_limit() -> None:
+    out = route_test_analysis_test_bug(RetryCounters(test_loop=2), _CONFIG)
+    assert out.decision == "escalate"
+
+
+def test_spec_gap_routes_at_limit_minus_one() -> None:
+    out = route_test_analysis_spec_gap(RetryCounters(test_loop=1), _CONFIG)
+    assert out.decision == "retry_same_agent"
+    assert out.next_state == "architecture"
+
+
+def test_spec_gap_escalates_at_limit() -> None:
+    out = route_test_analysis_spec_gap(RetryCounters(test_loop=2), _CONFIG)
+    assert out.decision == "escalate"

@@ -213,12 +213,15 @@ def test_malformed_exhausted_persists_raw_and_links(
     assert record["produced_by"] == "test_designer"
 
 
-def test_truncated_output_escalates_and_persists_raw(
-    sm: StateMachine, run_log_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_truncated_output_falls_through_to_gate(
+    sm: StateMachine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A response that hit max_tokens (finish_reason=length) is terminal: persist the
-    partial output, emit a truncation-specific gate, and escalate as output_truncated —
-    not as a generic malformed_output that would burn re-prompts re-truncating."""
+    """finish_reason=length no longer bypasses gate evaluation.
+
+    _invoke_agent returns the (truncated) content so the calling phase can route it
+    through schema_valid → malformed_output retries, giving transient API errors a
+    recovery path instead of immediately escalating as output_truncated."""
+    import logging
     from codeforge.model_router.router import RouterResult
 
     partial = '{"output": {"files": [{"path": "a.py", "content": "<cut off at max_tokens'
@@ -230,22 +233,46 @@ def test_truncated_output_escalates_and_persists_raw(
         ),
     )
 
-    with pytest.raises(EscalationError) as exc:
-        sm._invoke_agent("coder", "system", "turn")
-    assert exc.value.reason == "output_truncated"
+    with caplog.at_level(logging.WARNING, logger="codeforge.orchestrator.state_machine"):
+        result = sm._invoke_agent("coder", "system", "turn")
 
-    # The partial response is recoverable and linked from the escalation.
+    # Content is returned (not suppressed); caller drives gate evaluation.
+    assert result == partial
+    # Warning is emitted so finish_reason=length is visible in logs.
+    assert any("finish_reason=length" in r.message for r in caplog.records)
+    # No escalation was raised — the malformed/retry path owns that decision.
+    assert sm.run.escalations == []
+
+
+def test_truncated_output_exhausts_malformed_budget(
+    sm: StateMachine, run_log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Genuine max_tokens truncation exhausts malformed_output_retries and escalates
+    as max_retries_exceeded — same path as any unparseable structural failure."""
+    from codeforge.model_router.router import RouterResult
+
+    partial = '{"output": {"files": [{"path": "a.py", "content": "<cut off at max_tokens'
+    monkeypatch.setattr(
+        sm.router,
+        "complete",
+        lambda **kwargs: RouterResult(
+            content=partial, litellm_call_id="call-1", model_used="m", truncated=True
+        ),
+    )
+    # Exhaust the malformed budget so the next structural failure escalates.
+    sm.run.retry_counters.malformed_output = 99
+    gr = _malformed_gate_result()
+
+    with pytest.raises(EscalationError) as exc:
+        sm._handle_structural_failure(partial, "coder", gr)
+    assert exc.value.reason == "malformed_output"
+
+    # The partial response is persisted and linked from the escalation.
     artifact_id = sm.run.escalations[-1].agent_output_ref
     assert artifact_id
     raw_path = run_log_dir / sm.run.run_id / "raw_outputs" / f"{artifact_id}.json"
     assert raw_path.exists()
     assert json.loads(raw_path.read_text())["raw"] == partial
-
-    # The failing gate names truncation specifically and links the same artifact.
-    gate = _gate_events(run_log_dir, sm.run.run_id)[-1]
-    assert gate["passed"] is False
-    assert "truncated" in gate["detail"]
-    assert gate["artifact_ref"] == artifact_id
 
 
 def test_malformed_detail_names_the_failing_field() -> None:

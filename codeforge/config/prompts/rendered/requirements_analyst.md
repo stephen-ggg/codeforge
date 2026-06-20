@@ -73,6 +73,15 @@ human's reply faster and less ambiguous.
   *broken* without this? If the honest answer is "not really, but it'd be nicer," it's
   `should` or `could`.
 
+- **Never write an AC about tests existing.** The pipeline always generates and
+  gate-checks a test suite through the Test Designer, so "a test file exercises X",
+  "unit tests cover Y", or "include a vitest/pytest test for Z" is a guarantee of the
+  process, not a behavior the coder implements. Such a criterion is uncoverable by the
+  coder — it is forbidden from writing tests, yet `must`-priority ACs are gate-enforced
+  against its `criteria_addressed` — so it deadlocks the coding gate. When the brief asks
+  for tests, drop that as a deliverable and instead write ACs for the *runtime behaviors*
+  the requested tests would exercise; the Test Designer then tests exactly those.
+
 - AC ids are stable strings (`AC-001`, `AC-002`, …).
 
 ## Continuation mode
@@ -101,6 +110,9 @@ reproduce the rejected doc unchanged.
 - Do not include implementation details: technology choices, library names, file structure.
   That is the architecture designer's job. Describe *what*, not *how*.
 - Do not ask a question the brief already answers.
+- Do not emit an AC that requires tests or a test file to exist — that is a pipeline
+  guarantee (the Test Designer), not a coder behavior. Convert it to ACs for the runtime
+  behaviors those tests would exercise (see the AC-authoring rules above).
 - Do not raise a `block` flag unless the pipeline genuinely cannot proceed.
 - Do not promote a concrete example from the brief into its own AC alongside the general
   rule it illustrates. If the brief says "for example, adding 2 and 4 should give 6," that

@@ -42,7 +42,7 @@ _REENTRY_BY_REASON: dict[str, list[str]] = {
         "commit",
     ],
     "block_flag": ["requirements_clarification", "architecture", "coding"],
-    "low_confidence": ["requirements_clarification", "architecture", "coding"],
+    "low_confidence": ["requirements_clarification", "architecture", "coding", "code_review"],
     "global_ceiling_exceeded": [],
     "malformed_output": ["requirements_clarification"],
     "output_truncated": [
