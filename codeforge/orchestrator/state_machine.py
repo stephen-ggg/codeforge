@@ -16,10 +16,13 @@ Key invariants:
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NoReturn, cast
+
+logger = logging.getLogger(__name__)
 
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.firewall.assembler import ContextAssembler, ContextPackage
@@ -35,7 +38,6 @@ from codeforge.orchestrator.routing import (
     route_malformed,
     route_block_flag,
     route_ceiling_exceeded,
-    route_output_truncated,
     route_low_confidence,
     route_low_confidence_reprompt,
     route_requirements_clarify,
@@ -224,6 +226,7 @@ class StateMachine:
     def resume_run(self, run: CodeforgeRun) -> None:
         """Restore state from a persisted CodeforgeRun (codeforge resume command)."""
         self._run = run
+        self._run.config_snapshot = self._config.to_dict()
         run_log_dir = self._run_log_dir / run.run_id
         self._artifact_store = ArtifactStore(run_log_dir)
         self._pending = PendingWrites(self._project_state)
@@ -439,25 +442,12 @@ class StateMachine:
             litellm_call_id=result.litellm_call_id,
         )
 
-        # Truncated output (finish_reason == "length") is terminal: it can't be parsed,
-        # and a re-prompt would re-truncate at the same max_tokens. Persist the partial
-        # response for debugging, emit a self-sufficient gate event, and escalate with a
-        # clear reason rather than letting it masquerade as a generic malformed_output.
         if result.truncated:
-            artifact_id = self.artifact_store.write_raw(result.content, produced_by=agent_id)
-            self.event_log.emit_gate(
-                rule="schema_valid",
-                passed=False,
-                source_agent=typed_actor,
-                counters=self._counters_snap(),
-                detail=(
-                    "output truncated at max_tokens (finish_reason=length) — raise the "
-                    f"agent's max_tokens or reduce the unit of work for '{agent_id}'"
-                ),
-                artifact_ref=artifact_id,
+            logger.warning(
+                "Agent '%s' returned finish_reason=length (%d bytes); "
+                "routing through schema_valid gate for retry eligibility",
+                agent_id, len(result.content.encode()),
             )
-            self._apply_outcome(route_output_truncated())
-            self._escalate("output_truncated", context=artifact_id)
 
         return result.content
 
