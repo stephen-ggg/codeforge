@@ -1231,9 +1231,14 @@ class StateMachine:
         reprompt: RePromptContext | None = None
 
         while True:
-            # Budget check: test_loop must still have remaining budget
+            # Budget check: test_loop must still have remaining budget.
+            # Use > (strictly greater) so that a counter that was incremented to exactly
+            # the limit by route_test_analysis_* is still allowed one test run; the
+            # routing function is the authoritative decision point and already approved
+            # the cycle. Only fire test_design_exhausted if the counter somehow exceeds
+            # the limit (safety-net for unexpected re-entries).
             test_loop_limit = self._config.to_dict().get("retry_limits", {}).get("test_loop", 2)
-            if self.run.retry_counters.test_loop >= test_loop_limit:
+            if self.run.retry_counters.test_loop > test_loop_limit:
                 outcome = route_test_design_covmap_invalid(self.run.retry_counters, self._config.to_dict())
                 self._apply_outcome(outcome)
                 self._escalate(outcome.escalation_reason or "max_retries_exceeded")
@@ -1479,10 +1484,14 @@ class StateMachine:
             # "commit" re-entry skips the phase loop (mapped to "done" below) but still
             # needs code_art + test_suite for run_commit's closing asserts and the CLI's
             # source-code commit.
-            if initial_state in ("test_execution", "commit"):
+            # "test_design" re-entry also needs code_art: test_design is bypassed on
+            # resume so _run_impl_with_reviews never runs, leaving code_art=None. Without
+            # it the subsequent test_execution asserts immediately with a blank error.
+            if initial_state in ("test_design", "test_execution", "commit"):
                 code_data = self._load_artifact_output("code_artifact")
                 if code_data is not None:
                     code_art = CodeArtifact(**code_data)
+            if initial_state in ("test_execution", "commit"):
                 suite_data = self._load_artifact_output("test_suite")
                 if suite_data is not None:
                     test_suite = TestSuite(**suite_data)
