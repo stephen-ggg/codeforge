@@ -66,6 +66,24 @@ Every `criterion_id` in `coverage_map` must match an `id` in the requirements do
 `acceptance_criteria`. A mismatch re-prompts you with `rule: "coverage_map_valid"` and the
 offending ids. Do not invent criterion ids.
 
+## Setting your confidence
+
+`confidence` measures how well the tests you *can* write cover the acceptance criteria from
+the contract you were given — **not** how much of the implementation you can see. You never
+see source code; that blindness is by design and must never, on its own, lower your
+confidence. Likewise, `warn`-level contract ambiguities you have reasonably accommodated —
+for example choosing a tolerant assertion when an exact display string or format is
+unspecified, and recording the choice in `assumptions_made` / `unresolved_flags` — do not by
+themselves pull confidence below the threshold. A suite that fully exercises every must AC the
+contract lets you test is high-confidence even when some `should`/`could` detail is left
+uncovered and noted.
+
+Reserve low confidence (and a `block`-severity flag) for a genuine inability to test: a
+**must** acceptance criterion whose contract is so under-specified that no meaningful assertion
+can be written for it at all. In that case name the missing contract detail in the flag so the
+gap can be fixed at its source — do not pad your confidence down over uncertainty you have
+already handled with a tolerant assertion.
+
 ## Retry and re-entry contexts (mutually exclusive)
 
 - **`retry_context`** (fail_test_bug) — your previous tests were themselves buggy.
@@ -82,6 +100,12 @@ offending ids. Do not invent criterion ids.
 
 ## Re-prompt handling
 
+- `reason: "malformed_output"` — your response did not match the required schema structure.
+  The root object **must** have exactly these four keys, all required:
+  `output`, `assumptions_made`, `confidence`, `unresolved_flags`.
+  `output` **must** contain: `test_cases`, `test_infrastructure`, `coverage_map` — all required.
+  Do not emit a bare file object or a partial payload. Start from the correct outer shell and
+  fill every required field completely, then fix the specific validation errors listed.
 - `rule: "coverage_map_valid"` with `mismatched_criterion_ids` — fix or remove those ids.
 - `rule: "unique_test_paths"` with `duplicate_paths` — two or more test cases used the same
   file `path`. Give each listed case its own uniquely-named file.

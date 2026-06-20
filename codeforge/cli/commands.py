@@ -243,13 +243,15 @@ def _read_run_summary(run_log_dir: Path, run_id: str) -> dict[str, Any] | None:
     brief_file = run_dir / "brief.txt"
     brief = brief_file.read_text(encoding="utf-8").strip() if brief_file.exists() else None
 
-    # Surface the reason for the latest unresolved escalation, if any.
+    # Surface the reason and phase for the latest unresolved escalation, if any.
     escalation_reason: str | None = None
+    failed_phase: str | None = None
     escalations = data.get("escalations") or []
     if escalations:
         latest = escalations[-1]
         if not latest.get("resolved"):
             escalation_reason = latest.get("reason")
+            failed_phase = latest.get("suggested_reentry_state")
 
     return {
         "run_id": data.get("run_id", run_id),
@@ -258,6 +260,7 @@ def _read_run_summary(run_log_dir: Path, run_id: str) -> dict[str, Any] | None:
         "run_mode": data.get("run_mode"),
         "brief": brief,
         "escalation_reason": escalation_reason,
+        "failed_phase": failed_phase,
         "agent_call_count": data.get("agent_call_count"),
     }
 
@@ -427,6 +430,8 @@ def run(
     except EscalationError as exc:
         run_id = sm.run.run_id if sm._run else "unknown"
         typer.echo(f"\nCodeforge escalated: {exc.reason}", err=True)
+        if exc.phase:
+            typer.echo(f"Phase: {exc.phase}", err=True)
         typer.echo(f"Run ID: {run_id}", err=True)
         typer.echo(
             f"Review run-logs/{run_id}/events.jsonl for details.",
@@ -615,6 +620,8 @@ def resume(
 
     except EscalationError as exc:
         typer.echo(f"\nCodeforge escalated again: {exc.reason}", err=True)
+        if exc.phase:
+            typer.echo(f"Phase: {exc.phase}", err=True)
         typer.echo(f"Review run-logs/{run_id}/events.jsonl for details.", err=True)
         raise typer.Exit(2)
 
@@ -641,10 +648,10 @@ def list_runs(
     List all runs for a project, ordered newest first.
 
     Outputs a JSON array to stdout. Each element contains:
-      run_id, status, started_at, run_mode, brief, escalation_reason, agent_call_count
+      run_id, status, started_at, run_mode, brief, escalation_reason, failed_phase, agent_call_count
 
-    escalation_reason is non-null only when the latest escalation is unresolved
-    (i.e. the run is awaiting a resume decision).
+    escalation_reason and failed_phase are non-null only when the latest escalation
+    is unresolved (i.e. the run is awaiting a resume decision).
     """
     run_log_dir = _run_log_dir(project_dir)
     if not run_log_dir.exists():

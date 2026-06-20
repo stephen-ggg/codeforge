@@ -1,12 +1,14 @@
-Investigate a codeforge run and produce a structured diagnosis with a recommended next step.
+Investigate a codeforge run and produce a structured diagnosis with a source-level fix recommendation.
 
 Arguments: $ARGUMENTS — a run id, plus an OPTIONAL project name or run-dir path.
 Examples: `run-7a84ce2311b0`, `run-7a84ce2311b0 release-notes`,
 `run-7a84ce2311b0 /home/sabbamonte/projects/release-notes/codeforge-state/run-logs/run-7a84ce2311b0`.
 
 This is a READ-ONLY investigation. Never resume, edit, or run the pipeline. Your job
-is to read the right files in the right order, walk the reference chain, and hand a
-human an accurate starting point — not to dump raw file tails into the report.
+is to read the right files in the right order, walk the reference chain, and identify
+what needs to change in the Codeforge source — a prompt, gate, schema, or agent
+contract — so this class of failure does not recur. Do not suggest one-off reprompts
+or resume instructions; the goal is a fix to the framework.
 
 ## 0. Locate the run
 
@@ -87,7 +89,6 @@ routing `detail` contains `error_phase=...`, follow the test-execution branch be
 regardless of the escalation `reason`. Let the `detail` and `error_phase` drive you,
 not just the reason label.
 
-
 - `low_confidence` / `block_flag` → find the producing `handoff` event's
   `assembly_id`, open `context_packages/<assembly_id>.json`, and check `access_events`
   for `deny` decisions (with `reason_code`). A missing input the agent was denied is a
@@ -109,6 +110,31 @@ not just the reason label.
 - `human_required` → summarize the pending `human_interaction` and `suggested_reentry_state`.
 - `commit_failure` → focus on the commit-phase routing/gate `detail`.
 
+## 4a. Locate the fix target in Codeforge source
+
+Every failure — whether a prompt gap, a missing contract, a schema mismatch, or an
+access-policy hole — maps to a specific file in the Codeforge source tree. Identify it:
+
+- **Prompt gap** — the agent lacked a rule or example it needed. Fix: the rendered
+  prompt file under `prompts/` (find the template that produces it). The gap is usually
+  one of: a missing enum list, a missing constraint, or a missing worked example.
+- **Gate misconfiguration** — a gate fires on output the agent could not have known was
+  invalid (undocumented rule, newly tightened constraint with no prompt update, or a rule
+  that fires identically on every retry). Fix: either the gate implementation or the
+  prompt that tells the agent how to satisfy it — often both need updating together.
+- **Access/contract gap** — an agent was denied a file it needed, or two agents made
+  incompatible choices because one cannot see the other's output (e.g., test_designer
+  forbidden from reading code_artifact). Fix: the context-package assembly logic or the
+  `allowed_consumers` / `forbidden_consumers` policy for the relevant artifact type, OR
+  add a derived summary artifact that bridges the gap without exposing the full artifact.
+- **Schema mismatch** — the agent's output schema diverges from what downstream
+  consumers or gates expect. Fix: the schema definition and the corresponding prompt
+  section that documents valid values.
+
+In each case, name the Codeforge source path(s) precisely. If you cannot determine the
+path from the run artifacts alone, name the component (e.g., "security_reviewer prompt
+template" or "test_suite artifact schema") and describe what to grep for.
+
 ## 5. Report (inline only — write nothing to disk)
 
 Emit a structured report:
@@ -117,11 +143,14 @@ Emit a structured report:
 2. **Where it failed** — the decisive event: `sequence`, row/rule, and quoted `detail`.
 3. **Root cause** — the artifact / flag / raw-output / `error_phase` evidence. Give a
    clickable file path for every artifact you cite so the human can dig further.
-4. **Recommended next step** — which agent owns the fix (use the `error_phase` mapping
-   above where it applies), and when an escalation exists, a candidate resume directive
-   (`reentry_state` + `counter_resets`) drawn from `suggested_reentry_state`. Label this
-   clearly as a SUGGESTION, not an action you will take.
+4. **Fix target** — name the Codeforge source component(s) to change (prompt template,
+   gate, schema, access policy). One component per bullet. For each, describe precisely
+   what is wrong and what the correct behaviour should be.
 5. **If inconclusive** — name the specific files and `sequence` numbers to read next.
+
+Do not suggest resume options, reprompt workarounds, or run-specific patches. The
+output of this investigation is a to-do list for the framework, not instructions for
+salvaging the failed run.
 
 Prefer the deterministic fields (`status`, `error_phase`, `retry_counters`, escalation
 `reason`, gate/routing `detail`) before interpreting any free-text. Be selective — read
