@@ -78,10 +78,15 @@ class CommitWriter:
             # Stage only the project-state/ subtree
             repo.git.add("project-state/")
 
-            # Nothing to commit is not an error — maybe this run produced no state changes.
-            # The state repo is bootstrapped with an initial commit at project creation, so
-            # HEAD always resolves and the diff-against-HEAD short-circuit is safe.
-            if not repo.index.diff("HEAD") and not repo.untracked_files:
+            message = (
+                f"chore(codeforge): run {input.run_id} — {input.feature_title}"
+            )
+
+            # Skip the commit when either (a) nothing changed or (b) the HEAD commit
+            # already belongs to this run — the latter handles retry after push failure,
+            # where the same staged diff would otherwise produce a duplicate commit.
+            already_committed = input.run_id in repo.head.commit.message
+            if already_committed or (not repo.index.diff("HEAD") and not repo.untracked_files):
                 commit_sha = repo.head.commit.hexsha
                 return CommitWriterResult(
                     target="codeforge_state",
@@ -89,9 +94,6 @@ class CommitWriter:
                     commit_sha=commit_sha,
                 )
 
-            message = (
-                f"chore(codeforge): run {input.run_id} — {input.feature_title}"
-            )
             commit = repo.index.commit(message)
 
             repos_cfg = self._config.repos
@@ -183,21 +185,27 @@ class CommitWriter:
             worktree_dir = self._run_log_dir / input.run_id / "source-worktree"
             worktree_dir.parent.mkdir(parents=True, exist_ok=True)
             _prune_worktree(repo, worktree_dir)
-            if branch_name in (h.name for h in repo.heads):
+
+            branch_exists = branch_name in (h.name for h in repo.heads)
+            # A prior attempt already wrote + committed when the branch tip is ahead of
+            # base. Skip re-applying edits — old_strings are already replaced and a
+            # second application raises "old_string not found".
+            commit_already_landed = branch_exists and repo.commit(branch_name).hexsha != base_sha
+
+            if branch_exists:
                 repo.git.worktree("add", str(worktree_dir), branch_name)
             else:
                 repo.git.worktree("add", str(worktree_dir), "-b", branch_name, base_sha)
 
             wt = git.Repo(worktree_dir)
-            _write_code_artifact(worktree_dir, code_artifact)
-            _write_test_suite(worktree_dir, test_suite)
+            if not commit_already_landed:
+                _write_code_artifact(worktree_dir, code_artifact)
+                _write_test_suite(worktree_dir, test_suite)
 
-            wt.git.add("-A")
-            message = f"feat({input.feature_title}): implement {input.feature_title}"
-            # Skip the commit when nothing changed (resume after the commit already
-            # landed but a later step failed); reuse the existing branch tip.
-            if wt.git.diff("--cached", "--name-only").strip():
-                wt.git.commit("-m", message)
+                wt.git.add("-A")
+                message = f"feat({input.feature_title}): implement {input.feature_title}"
+                if wt.git.diff("--cached", "--name-only").strip():
+                    wt.git.commit("-m", message)
             commit_sha = wt.head.commit.hexsha
 
             # Push + open PR only when a remote is configured. Do this BEFORE advancing

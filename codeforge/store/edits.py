@@ -31,6 +31,8 @@ def apply_edits(original: str, edits: list[Edit]) -> str:
         count = result.count(edit.old_string)
         snippet = edit.old_string[:60].replace("\n", "\\n")
         if count == 0:
+            if edit.new_string in result:
+                continue  # already applied — idempotent
             raise EditError(f"edit {i}: old_string not found: {snippet!r}")
         if count > 1:
             raise EditError(

@@ -12,12 +12,12 @@ from pathlib import Path
 import pytest
 
 from codeforge.agents.commit_writer import _write_code_artifact
-from codeforge.schemas.contracts import CodeArtifact, CodeFile, Edit
+from codeforge.schemas.contracts import CodeArtifact, CodeFile, Edit, ModuleInterfaces
 from codeforge.store.edits import EditError
 
 
 def _artifact(files: list[CodeFile]) -> CodeArtifact:
-    return CodeArtifact(files=files, change_summary="s", criteria_addressed=[], interface_changes=[])
+    return CodeArtifact(files=files, module_interfaces=ModuleInterfaces(files=[]), change_summary="s", criteria_addressed=[], interface_changes=[])
 
 
 def test_modified_file_is_patched_in_place(tmp_path: Path) -> None:

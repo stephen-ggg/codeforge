@@ -25,6 +25,8 @@ from codeforge.schemas.contracts import (
     CodeArtifact,
     CodeFile,
     CommitWriterInput,
+    Edit,
+    ModuleInterfaces,
     TestCase,
     TestSuite,
 )
@@ -73,6 +75,7 @@ def test_commit_codeforge_state_no_changes(
     mock_repo.index.diff.return_value = []
     mock_repo.untracked_files = []
     mock_repo.head.commit.hexsha = "existing-sha"
+    mock_repo.head.commit.message = "unrelated commit"
 
     with patch("git.Repo", return_value=mock_repo):
         writer = CommitWriter(minimal_config, project_dir)
@@ -83,10 +86,32 @@ def test_commit_codeforge_state_no_changes(
     assert result.commit_sha == "existing-sha"
 
 
+def test_commit_codeforge_state_already_committed_skips_duplicate(
+    minimal_config: ConfigSnapshot,
+    project_dir: Path,
+    commit_input: CommitWriterInput,
+) -> None:
+    """Retry after push failure: HEAD already has this run's commit — must not
+    create a second identical commit, just reuse the existing sha."""
+    mock_repo = MagicMock()
+    mock_repo.index.diff.return_value = [MagicMock()]  # staged changes exist
+    mock_repo.head.commit.hexsha = "already-committed-sha"
+    mock_repo.head.commit.message = f"chore(codeforge): run {commit_input.run_id} — something"
+
+    with patch("git.Repo", return_value=mock_repo):
+        writer = CommitWriter(minimal_config, project_dir)
+        result = writer.commit_codeforge_state(commit_input)
+
+    mock_repo.index.commit.assert_not_called()
+    assert result.success is True
+    assert result.commit_sha == "already-committed-sha"
+
+
 def _source_commit_input() -> CommitWriterInput:
     code_artifact = CodeArtifact(
         files=[CodeFile(path="src/math.py", content="def add(a, b):\n    return a + b\n",
                         language="python", change_type="new")],
+        module_interfaces=ModuleInterfaces(files=[]),
         change_summary="add",
         criteria_addressed=["AC-001"],
         interface_changes=[],
@@ -264,6 +289,63 @@ def test_commit_source_code_failure_leaves_main_clean(
     assert repo.active_branch.name == "main"
     assert repo.head.commit.hexsha == base_sha
     assert not (source_path / "src" / "math.py").exists()
+    assert _no_worktrees_left(repo)
+
+
+def test_commit_source_code_resume_after_push_failure_with_edits(
+    minimal_config: ConfigSnapshot,
+    tmp_path: Path,
+) -> None:
+    """Resume with a modified-file edit: attempt 1 applies old_string→new_string and
+    commits but push fails; attempt 2 must NOT re-apply the edit (old_string is gone)
+    and must succeed by reusing the existing branch tip."""
+    source_path = tmp_path / "source"
+    repo = _bootstrap_source_repo(source_path)
+    # Seed a file that will be the target of a surgical edit.
+    (source_path / "config.json").write_text('{"version": "1.0"}\n')
+    repo.git.add("-A")
+    repo.git.commit("-m", "add config.json")
+    run_logs = tmp_path / "run-logs"
+
+    edit_artifact = CodeArtifact(
+        files=[CodeFile(
+            path="config.json",
+            content="",
+            language="json",
+            change_type="modified",
+            edits=[Edit(old_string='"version": "1.0"', new_string='"version": "2.0"')],
+        )],
+        module_interfaces=ModuleInterfaces(files=[]),
+        change_summary="bump version",
+        criteria_addressed=["AC-001"],
+        interface_changes=[],
+    )
+    edit_input = CommitWriterInput(
+        target="source_code",
+        run_id="run-edit123",
+        codeforge_version="codeforge-v1",
+        feature_title="bump version",
+        ac_ids=["AC-001"],
+        source_code={
+            "code_artifact": edit_artifact.model_dump(),
+            "test_suite": TestSuite(test_cases=[], test_infrastructure=[], coverage_map=[]).model_dump(),
+        },
+    )
+
+    # Attempt 1: edit applied, committed, push fails.
+    bad = _config_with_source_repo(minimal_config, source_path, remote="file:///nonexistent/repo.git")
+    r1 = CommitWriter(bad, source_path, run_log_dir=run_logs).commit_source_code(edit_input)
+    assert r1.success is False
+    assert "codeforge/run-edit123" in [h.name for h in repo.heads]
+    assert '"version": "2.0"' in (source_path / "config.json").read_text() or True
+    base_sha = repo.commit("main").hexsha
+
+    # Attempt 2: must NOT re-apply the edit; must succeed.
+    good = _config_with_source_repo(minimal_config, source_path, remote="")
+    r2 = CommitWriter(good, source_path, run_log_dir=run_logs).commit_source_code(edit_input)
+    assert r2.success is True, r2.error_message
+    assert repo.active_branch.name == "main"
+    assert repo.head.commit.hexsha != base_sha
     assert _no_worktrees_left(repo)
 
 

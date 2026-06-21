@@ -1,7 +1,22 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+
 from codeforge.config.prompts.build import _type_label, field_reference
 from codeforge.schemas.contracts import SecurityReport
+
+
+def test_rendered_prompts_are_not_stale() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "codeforge.config.prompts.build", "--check"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"Rendered prompts are stale — run `python -m codeforge.config.prompts.build`.\n"
+        f"{result.stdout}{result.stderr}"
+    )
 
 
 def test_type_label_renders_fixed_tuple_as_bracketed_ints() -> None:

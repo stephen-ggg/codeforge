@@ -16,6 +16,25 @@
         "change_reason": "Implements AC-001, AC-002, and AC-003."
       }
     ],
+    "module_interfaces": {
+      "files": [
+        {
+          "path": "src/even_sum.py",
+          "imports": [
+            { "specifier": "__future__", "named": ["annotations"] }
+          ],
+          "exports": [
+            {
+              "name": "sum_even",
+              "kind": "function",
+              "signature": "def sum_even(numbers: list[int]) -> int"
+            }
+          ],
+          "env_vars_read": [],
+          "fs_path_patterns": []
+        }
+      ]
+    },
     "change_summary": "Add src/even_sum.py implementing sum_even, summing even integers, returning 0 for empty input, and raising TypeError on non-integer input.",
     "criteria_addressed": ["AC-001", "AC-002", "AC-003"],
     "interface_changes": [

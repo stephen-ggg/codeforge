@@ -126,7 +126,7 @@ def test_error_result_allows_unclassified_phase() -> None:
 def test_run_returns_error_when_source_assembly_raises(monkeypatch) -> None:
     # When _resolve_code_entries raises (e.g. an EditError in continuation), run() must
     # return an error result, not raise — and it must do so before touching Docker.
-    from codeforge.schemas.contracts import TestRunnerInput, TestSuite, CodeArtifact
+    from codeforge.schemas.contracts import TestRunnerInput, TestSuite, CodeArtifact, ModuleInterfaces
 
     def _boom(_input, _profile):
         raise RuntimeError("edit conflict")
@@ -137,7 +137,7 @@ def test_run_returns_error_when_source_assembly_raises(monkeypatch) -> None:
     runner = TestRunner(snap)
     inp = TestRunnerInput(
         test_suite=TestSuite(test_cases=[], test_infrastructure=[], coverage_map=[]),
-        code_artifact=CodeArtifact(files=[], change_summary="s", criteria_addressed=[], interface_changes=[]),
+        code_artifact=CodeArtifact(files=[], module_interfaces=ModuleInterfaces(files=[]), change_summary="s", criteria_addressed=[], interface_changes=[]),
         run_config={},
     )
     res = runner.run(inp)

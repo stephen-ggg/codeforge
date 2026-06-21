@@ -85,11 +85,34 @@ state. No hardcoded secrets — read them from environment variables. No debug p
 commented-out code. Document every public function/class as the language conventions expect.
 One module per architectural module.
 
+## module_interfaces
+
+`module_interfaces` is a sanitised surface the orchestrator extracts and shares with the
+test designer so they can write correct mock calls. It is **not** a test hint — it is
+purely structural metadata about the module boundary.
+
+For each source file you write, add one `ModuleFile` entry:
+
+- **`imports`** — list every top-level import with its exact `specifier` string as written
+  in your source (e.g. `"node:fs"`, `"node:fs/promises"`, `"@/lib/db"`) and the named
+  bindings. For `import { promises as fs } from "node:fs"` the entry is
+  `{ specifier: "node:fs", named: ["promises as fs"] }`.
+- **`exports`** — list every exported symbol with a single-line type signature.
+  For a function: `"export function readConfig(path: string): Promise<Config>"`.
+  For a class: `"export class ConfigStore"`.
+- **`env_vars_read`** — every `process.env.KEY` or `os.environ["KEY"]` the file reads.
+- **`fs_path_patterns`** — path patterns the file accesses, e.g. `"{dir}/codeforge_run.json"`.
+
+**Hard rule: no function bodies, no algorithm detail, no multi-line signatures.** Each
+`signature` must fit on one line and be ≤ 300 characters. Violation fires the
+`module_interfaces_no_bodies` gate and forces a re-prompt.
+
 ## Re-prompt handling
 
 - `rule: "requirements_txt_present"` — add the dependency manifest file.
 - `rule: "ac_coverage_must"` with `uncovered_ac_ids` — implement and declare those ACs.
 - `rule: "package_json_dev_script"` — `package.json` is missing `"dev": "next dev"` in `scripts`. For a `change_type: "new"` file add it directly to `content`; for a `change_type: "modified"` file add it via an `edits[]` entry.
+- `rule: "module_interfaces_no_bodies"` with `leaking_signatures` — the listed `path::export` entries contain multi-line or overlong signatures. Resubmit with **only `module_interfaces` corrected** (all signatures must be single-line type declarations, ≤ 300 chars). Do not change `files`, `change_summary`, `criteria_addressed`, or `interface_changes`.
 
 ## What you must NOT do
 
@@ -210,6 +233,13 @@ Your response payload must be a single JSON object matching the schema below. Pr
 | `output.files[].edits` | `Edit[]` | optional |
 | `output.files[].edits[].old_string` | `string` | required |
 | `output.files[].edits[].new_string` | `string` | required |
+| `output.module_interfaces` | `ModuleInterfaces` | required |
+| `output.module_interfaces.files` | `ModuleFile[]` | required |
+| `output.module_interfaces.files[].path` | `string` | required |
+| `output.module_interfaces.files[].imports` | `ModuleImport[]` | required |
+| `output.module_interfaces.files[].exports` | `ModuleExport[]` | required |
+| `output.module_interfaces.files[].env_vars_read` | `string[]` | required |
+| `output.module_interfaces.files[].fs_path_patterns` | `string[]` | required |
 | `output.change_summary` | `string` | required |
 | `output.criteria_addressed` | `string[]` | required |
 | `output.interface_changes` | `object[]` | required |
@@ -248,6 +278,30 @@ This is an illustrative example with realistic values — match its structure, n
         "change_reason": "Implements AC-001, AC-002, and AC-003."
       }
     ],
+    "module_interfaces": {
+      "files": [
+        {
+          "path": "src/even_sum.py",
+          "imports": [
+            {
+              "specifier": "__future__",
+              "named": [
+                "annotations"
+              ]
+            }
+          ],
+          "exports": [
+            {
+              "name": "sum_even",
+              "kind": "function",
+              "signature": "def sum_even(numbers: list[int]) -> int"
+            }
+          ],
+          "env_vars_read": [],
+          "fs_path_patterns": []
+        }
+      ]
+    },
     "change_summary": "Add src/even_sum.py implementing sum_even, summing even integers, returning 0 for empty input, and raising TypeError on non-integer input.",
     "criteria_addressed": [
       "AC-001",

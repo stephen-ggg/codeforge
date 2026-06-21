@@ -28,11 +28,12 @@ class TestAnalystAgent(BaseAgent):
 
     Input context:
       - requirements_doc (from artifacts)
+      - code_artifact (from artifacts — to verify import style when classifying failures)
       - test_suite (from artifacts)
       - test_runner_results (injected by orchestrator after test execution)
       - test_coverage_map_md (from state_documents)
 
-    Does NOT receive code_artifact, architecture_doc, or coder context.
+    Does NOT receive architecture_doc or coder reasoning.
     """
 
     def build_user_turn(
@@ -46,6 +47,8 @@ class TestAnalystAgent(BaseAgent):
         payload: dict[str, Any] = {
             "requirements_doc": artifacts["requirements_doc"].model_dump()
             if "requirements_doc" in artifacts else None,
+            "code_artifact": artifacts["code_artifact"].model_dump()
+            if "code_artifact" in artifacts else None,
             "test_suite": artifacts["test_suite"].model_dump()
             if "test_suite" in artifacts else None,
             # test_runner_results are injected by the orchestrator into state_documents

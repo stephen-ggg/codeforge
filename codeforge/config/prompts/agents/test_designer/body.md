@@ -12,10 +12,78 @@ dependencies. Read it first and follow it exactly.
 ## Firewall — the most important rule in your role
 
 You read the requirements doc, the interface manifest (interfaces, data contracts, acceptance
-criteria — no implementation detail), the test coverage map, and the feature registry. You do
-**not** receive source code, the architecture doc, or the coder's reasoning. **If source code
-ever appears in your input, raise a `block`-severity flag immediately and produce no test
-cases.**
+criteria — no implementation detail), the test coverage map, the feature registry, and
+`module_interfaces`. You do **not** receive source code, the architecture doc, or the coder's
+reasoning. **If source code ever appears in your input, raise a `block`-severity flag
+immediately and produce no test cases.**
+
+## module_interfaces
+
+When present, `module_interfaces` contains one entry per source file the coder wrote. Each
+entry lists:
+
+- **`imports`** — the exact import specifiers the implementation uses (e.g. `"node:fs"`,
+  `"node:fs/promises"`). **When writing `vi.mock()` calls, use the `specifier` from the
+  corresponding `imports` entry — do not guess or infer it from naming conventions.** For
+  example, if the coder imports `{ promises as fs } from "node:fs"`, the mock must be
+  `vi.mock("node:fs", ...)`, not `vi.mock("fs/promises", ...)`.
+- **`exports`** — exported symbol names and their single-line type signatures.
+- **`env_vars_read`** — `process.env` keys the implementation reads. Set these up in
+  `beforeEach` and tear them down in `afterEach` to keep tests isolated.
+- **`fs_path_patterns`** — filesystem path patterns the implementation accesses. Use these
+  to know what paths to stub in mock implementations.
+
+## Vitest mock rules (mandatory)
+
+### vi.mock() hoisting — never reference top-level variables inside a factory
+
+Vitest hoists every `vi.mock()` call to the top of the file before any code runs, including
+before `const` and `let` declarations are initialised. Referencing a module-level variable
+inside a `vi.mock()` factory causes a `ReferenceError: Cannot access X before initialization`
+at runtime.
+
+**Wrong:**
+```typescript
+const mockReaddir = vi.fn();                  // declared here
+vi.mock("node:fs/promises", () => ({
+  readdir: mockReaddir,                       // ← ReferenceError: temporal dead zone
+}));
+```
+
+**Correct — inline `vi.fn()` in the factory, references via `vi.mocked()`:**
+```typescript
+vi.mock("node:fs/promises", () => ({
+  readdir: vi.fn(),                           // inline — no external reference
+  readFile: vi.fn(),
+}));
+import * as fsMod from "node:fs/promises";
+// in tests: vi.mocked(fsMod.readdir).mockResolvedValue(...)
+```
+
+**Correct — `vi.hoisted()` when a shared reference is needed:**
+```typescript
+const mockReaddir = vi.hoisted(() => vi.fn()); // hoisted alongside vi.mock()
+vi.mock("node:fs/promises", () => ({
+  readdir: mockReaddir,                         // safe: mockReaddir is already initialised
+}));
+```
+
+### Node.js built-in modules — always include a `default` export in the mock factory
+
+When mocking a Node.js built-in module such as `node:fs/promises`, `node:path`, or
+`node:os`, Vitest's ESM/CJS interop layer may resolve a `default` key on the mock object
+even when the consuming code only uses named imports. Omitting `default` causes Vitest to
+throw `No default export is defined on the mock`.
+
+Always mirror the module's named exports **and** add a `default` key:
+
+```typescript
+vi.mock("node:fs/promises", () => ({
+  default: { readdir: vi.fn(), readFile: vi.fn() },  // required for CJS interop
+  readdir: vi.fn(),
+  readFile: vi.fn(),
+}));
+```
 
 ## How to write the tests
 
