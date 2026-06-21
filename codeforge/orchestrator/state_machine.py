@@ -523,7 +523,8 @@ class StateMachine:
             if reprompt_outcome.decision == "re_prompt_same_agent":
                 threshold = float(cfg.get("confidence_thresholds", {}).get(agent_id, 0.0))
                 limit = int(cfg.get("retry_limits", {}).get("low_confidence_reprompt", 1))
-                attempt = self.run.retry_counters.low_confidence_reprompt + 1
+                counter_field = f"{agent_id}_low_confidence_reprompt"
+                attempt = getattr(self.run.retry_counters, counter_field, 0) + 1
                 reprompt_outcome.detail = (
                     f"prior_confidence={output.confidence} threshold={threshold} "
                     f"(re-prompt {attempt}/{limit})"

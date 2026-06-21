@@ -146,16 +146,18 @@ def route_low_confidence_reprompt(
 ) -> RoutingOutcome:
     """
     Policy stage: confidence below threshold — re-prompt the same agent once (a 'be more
-    thorough' nudge) before escalating. Returns a re-prompt outcome while within budget,
-    else the terminal low_confidence escalation.
+    thorough' nudge) before escalating. Each agent has its own independent counter so one
+    agent's retry does not consume another's budget.
     """
+    counter_field = f"{agent_id}_low_confidence_reprompt"
+    current = getattr(counters, counter_field, 0)
     limit = _get_limit(config, "low_confidence_reprompt", 1)
-    if _within_budget(counters.low_confidence_reprompt, limit):
+    if _within_budget(current, limit):
         return RoutingOutcome(
             row_id="low_confidence_reprompt",
             decision="re_prompt_same_agent",
             next_state=f"{agent_id}_reprompt",
-            counter_deltas={"low_confidence_reprompt": 1},
+            counter_deltas={counter_field: 1},
             extra={"agent_id": agent_id},
         )
     return RoutingOutcome(
@@ -491,8 +493,8 @@ def route_test_analysis_code_bug(
             decision="retry_same_agent",
             next_state="coding",
             counter_deltas={"test_loop": 1},
-            # fresh coder invocation — restore its per-invocation re-prompt cushions.
-            counter_resets=["low_confidence_reprompt", "malformed_output"],
+            # fresh coder invocation — restore its per-invocation re-prompt cushion.
+            counter_resets=["coder_low_confidence_reprompt", "malformed_output"],
         )
     return RoutingOutcome(
         row_id="test_analysis_code_bug_exhausted",
@@ -516,8 +518,8 @@ def route_test_analysis_test_bug(
             next_state="test_design",
             counter_deltas={"test_loop": 1},
             # fresh test_designer invocation — restore its per-invocation re-prompt
-            # cushions so a low-confidence/malformed retry isn't denied its one shot.
-            counter_resets=["low_confidence_reprompt", "malformed_output"],
+            # cushion so a low-confidence/malformed retry isn't denied its one shot.
+            counter_resets=["test_designer_low_confidence_reprompt", "malformed_output"],
         )
     return RoutingOutcome(
         row_id="test_analysis_test_bug_exhausted",
@@ -545,7 +547,12 @@ def route_test_analysis_spec_gap(
             counter_resets=[
                 "code_review_loop",
                 "security_review_loop",
-                "low_confidence_reprompt",
+                # spec_gap re-enters at architecture and runs the full pipeline again —
+                # reset every downstream agent's per-invocation reprompt cushion.
+                "architecture_designer_low_confidence_reprompt",
+                "coder_low_confidence_reprompt",
+                "code_reviewer_low_confidence_reprompt",
+                "security_reviewer_low_confidence_reprompt",
                 "malformed_output",
             ],
         )

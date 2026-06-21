@@ -397,7 +397,7 @@ def test_low_confidence_reprompts_once_before_escalating(sm: StateMachine, run_l
     )
     assert isinstance(reprompt, LowConfidenceRePrompt)
     assert reprompt.reason == "low_confidence"
-    assert sm.run.retry_counters.low_confidence_reprompt == 1
+    assert sm.run.retry_counters.test_analyst_low_confidence_reprompt == 1
 
     gate = _gate_events(run_log_dir, sm.run.run_id)[-1]
     assert gate["rule"] == "confidence_threshold"
@@ -409,7 +409,7 @@ def test_low_confidence_escalates_when_reprompt_budget_exhausted(
     sm: StateMachine, run_log_dir: Path
 ) -> None:
     # Pre-exhaust the one-shot re-prompt budget so the next low-confidence failure is terminal.
-    sm.run.retry_counters.low_confidence_reprompt = 1
+    sm.run.retry_counters.test_analyst_low_confidence_reprompt = 1
 
     with pytest.raises(EscalationError) as exc:
         sm._handle_policy_escalation(
