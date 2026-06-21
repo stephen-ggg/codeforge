@@ -245,7 +245,14 @@ class RetryCounters(BaseModel):
     infrastructure: int = 0
     environment_repair: int = 0   # auto-recovery: re-invoke test_designer to fix test infra/deps
     dependency_repair: int = 0    # auto-recovery: re-invoke coder to fix runtime requirements.txt
-    low_confidence_reprompt: int = 0  # one-shot re-prompt of an agent before low-confidence escalate
+    # Per-agent one-shot re-prompt budgets (each agent gets its own independent retry).
+    requirements_analyst_low_confidence_reprompt: int = 0
+    architecture_designer_low_confidence_reprompt: int = 0
+    coder_low_confidence_reprompt: int = 0
+    code_reviewer_low_confidence_reprompt: int = 0
+    security_reviewer_low_confidence_reprompt: int = 0
+    test_designer_low_confidence_reprompt: int = 0
+    test_analyst_low_confidence_reprompt: int = 0
     malformed_output: int = 0
     codeforge_state_commit: int = 0
     source_code_commit: int = 0
@@ -1036,7 +1043,13 @@ class CountersSnapshot(BaseModel):
     infrastructure: int = 0
     environment_repair: int = 0
     dependency_repair: int = 0
-    low_confidence_reprompt: int = 0
+    requirements_analyst_low_confidence_reprompt: int = 0
+    architecture_designer_low_confidence_reprompt: int = 0
+    coder_low_confidence_reprompt: int = 0
+    code_reviewer_low_confidence_reprompt: int = 0
+    security_reviewer_low_confidence_reprompt: int = 0
+    test_designer_low_confidence_reprompt: int = 0
+    test_analyst_low_confidence_reprompt: int = 0
     malformed_output: int = 0
     codeforge_state_commit: int = 0
     source_code_commit: int = 0

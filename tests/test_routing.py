@@ -76,16 +76,24 @@ def test_low_confidence_reprompt_in_budget() -> None:
     out = route_low_confidence_reprompt("coder", RetryCounters(), _CONFIG)
     assert out.decision == "re_prompt_same_agent"
     assert out.next_state == "coder_reprompt"
-    assert out.counter_deltas == {"low_confidence_reprompt": 1}
+    assert out.counter_deltas == {"coder_low_confidence_reprompt": 1}
     assert out.escalation_reason is None
 
 
 def test_low_confidence_reprompt_exhausted_escalates() -> None:
-    counters = RetryCounters(low_confidence_reprompt=1)  # at the limit
+    counters = RetryCounters(coder_low_confidence_reprompt=1)  # at the limit
     out = route_low_confidence_reprompt("coder", counters, _CONFIG)
     assert out.decision == "escalate"
     assert out.escalation_reason == "low_confidence"
     assert out.row_id == "low_confidence_reprompt_exhausted"
+
+
+def test_low_confidence_reprompt_per_agent_independent() -> None:
+    # Coder budget exhausted should not block security_reviewer.
+    counters = RetryCounters(coder_low_confidence_reprompt=1)
+    out = route_low_confidence_reprompt("security_reviewer", counters, _CONFIG)
+    assert out.decision == "re_prompt_same_agent"
+    assert out.counter_deltas == {"security_reviewer_low_confidence_reprompt": 1}
 
 
 # ----------------------------------------------------------------------
@@ -101,14 +109,14 @@ def test_test_bug_retry_resets_reprompt_cushions() -> None:
     out = route_test_analysis_test_bug(RetryCounters(test_loop=0), _CONFIG)
     assert out.decision == "retry_same_agent"
     assert out.next_state == "test_design"
-    assert "low_confidence_reprompt" in out.counter_resets
+    assert "test_designer_low_confidence_reprompt" in out.counter_resets
     assert "malformed_output" in out.counter_resets
 
 
 def test_code_bug_retry_resets_reprompt_cushions() -> None:
     out = route_test_analysis_code_bug(RetryCounters(test_loop=0), _CONFIG)
     assert out.next_state == "coding"
-    assert "low_confidence_reprompt" in out.counter_resets
+    assert "coder_low_confidence_reprompt" in out.counter_resets
     assert "malformed_output" in out.counter_resets
 
 
@@ -118,8 +126,11 @@ def test_spec_gap_retry_resets_reprompt_cushions_and_review_loops() -> None:
     # keeps its original review-loop resets …
     assert "code_review_loop" in out.counter_resets
     assert "security_review_loop" in out.counter_resets
-    # … and now also restores the per-invocation cushions.
-    assert "low_confidence_reprompt" in out.counter_resets
+    # … and restores per-agent cushions for all downstream agents.
+    assert "architecture_designer_low_confidence_reprompt" in out.counter_resets
+    assert "coder_low_confidence_reprompt" in out.counter_resets
+    assert "code_reviewer_low_confidence_reprompt" in out.counter_resets
+    assert "security_reviewer_low_confidence_reprompt" in out.counter_resets
     assert "malformed_output" in out.counter_resets
 
 

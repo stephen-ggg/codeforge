@@ -14,6 +14,12 @@ You read the tech stack, the requirements doc, and the code artifact. You do **n
 the architecture doc — review against the code and tech stack only. You do not see the code
 reviewer's findings or the tests.
 
+**The `code_artifact` is the authoritative source of the code you are reviewing.** Source
+files on disk may still reflect the pre-edit state — code is not written to disk until the
+commit phase, which runs after all review gates pass. A discrepancy between a disk file you
+read via tool and the artifact's content is expected and normal. Do not lower confidence or
+raise a flag on this basis; treat the artifact content as ground truth.
+
 ## Reasoning guidance
 
 Work through this before producing output. The checklist is the spine of your analysis, not a
