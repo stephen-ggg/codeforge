@@ -767,12 +767,13 @@ class TestSuite(BaseModel):
 class TestDesignerRetryContext(BaseModel):
     """
     Built by whitelist projection — gate: test_bug_context_clean.
-    Only test_case, root_cause_hypothesis, recommended_action are copied.
-    No TestResult content ever included.
+    Each entry carries: test_case_id, file_paths, recommended_action.
+    evidence is intentionally excluded (may reference source internals).
+    No TestResult content, no implementation details ever included.
     """
     retry_number: int
     max_retries: int
-    failed_test_cases: list[dict[str, Any]] # [{test_case, root_cause_hypothesis, recommended_action}]
+    failed_test_cases: list[dict[str, Any]] # [{test_case_id, file_paths, recommended_action}]
 
 
 class TestDesignerInput(BaseModel):
