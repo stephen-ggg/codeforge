@@ -1817,16 +1817,11 @@ def _build_test_fix_context(
     """
     Build the retry_context dict passed back to the test_designer after a fail_test_bug verdict.
 
-    Firewall-safe whitelist projection — includes only the analyst's recommended_action and
-    evidence for test_bug failures, plus the path of each affected test file so the designer
-    knows which cases to revise. Never forwards code, the raw test_analysis artifact, or any
-    implementation detail.
+    Firewall-safe whitelist projection (gate: test_bug_context_clean) — only
+    recommended_action and file_paths cross over. evidence is intentionally excluded:
+    it is the analyst's internal reasoning and may reference source file paths, line
+    numbers, or implementation details that test_designer must never see.
     """
-    failed_tc_ids = {
-        fa.test_case_id
-        for fa in analysis.failure_analyses
-        if fa.root_cause_hypothesis == "test_bug"
-    }
     tc_paths: dict[str, list[str]] = {
         tc.id: [code.path for code in tc.code]
         for tc in test_suite.test_cases
@@ -1836,7 +1831,6 @@ def _build_test_fix_context(
             "test_case_id": fa.test_case_id,
             "file_paths": tc_paths.get(fa.test_case_id, []),
             "recommended_action": fa.recommended_action,
-            "evidence": fa.evidence,
         }
         for fa in analysis.failure_analyses
         if fa.root_cause_hypothesis == "test_bug"

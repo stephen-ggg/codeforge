@@ -67,6 +67,21 @@ behaviour:
 ValueError." **Bad:** "Line 47 of test_even_sum.py asserts `result == 0` but even_sum.py
 raises on line 23."
 
+## `recommended_action` for test_bug — observable test behaviour only
+
+This text is passed to the test_designer, who must never learn implementation details.
+It must describe what the test does wrong and how to correct the test itself:
+
+- Describe the incorrect assertion, mock, or setup and what the test should do instead.
+- Do **not** quote source code, implementation file names, line numbers, or any detail
+  derived from reading `code_artifact`.
+- Do **not** prescribe what the implementation does — describe what the test should assert.
+
+**Good:** "The mock for `readRunSummaries` should return a plain array, not an object
+with a `data` property — the assertion expects `result` to be the array directly."
+**Bad:** "lib/runs-reader.ts line 12 exports `readRunSummaries` as a named export;
+the mock uses a default import which resolves to undefined."
+
 ## spec_gap field
 
 When a failure is `spec_gap`, populate `spec_gap` precisely: which `criterion_id` and
