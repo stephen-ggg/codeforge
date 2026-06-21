@@ -325,9 +325,9 @@ def test_backoff_exhausted_falls_to_fallback_model(monkeypatch, minimal_config: 
     router = ModelRouter(config)
     result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
 
-    assert primary_calls["n"] == router_mod._MAX_RETRIES
+    assert primary_calls["n"] == router_mod._MAX_ATTEMPTS
     assert fallback_calls["n"] == 1
-    assert len(sleep_calls) == router_mod._MAX_RETRIES - 1
+    assert len(sleep_calls) == router_mod._MAX_ATTEMPTS - 1
     assert result.model_used == "claude-haiku-4-5-20251001"
     assert result.content == '{"output": {}, "confidence": 0.7}'
 
@@ -350,7 +350,7 @@ def test_backoff_all_exhausted_raises_router_error(monkeypatch, minimal_config: 
     with pytest.raises(RouterError):
         router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
 
-    assert call_count["n"] == router_mod._MAX_RETRIES * 2
+    assert call_count["n"] == router_mod._MAX_ATTEMPTS * 2
 
 
 def test_tool_loop_backoff_per_individual_call(monkeypatch, minimal_config: ConfigSnapshot) -> None:
@@ -448,7 +448,7 @@ def test_tool_loop_retry_exhaustion_falls_to_forced_final(monkeypatch, minimal_c
             return _response(
                 _msg("", [_tool_call("tc1", "read_file", '{"path": "x.py"}')]), "t1",
             )
-        if n <= 1 + router_mod._MAX_RETRIES:
+        if n <= 1 + router_mod._MAX_ATTEMPTS:
             raise ServiceUnavailableError(
                 message="overloaded", llm_provider="anthropic", model="claude-opus-4-8",
             )
@@ -474,8 +474,8 @@ def test_tool_loop_retry_exhaustion_falls_to_forced_final(monkeypatch, minimal_c
     roles = [m["role"] for m in forced_final_messages]
     assert "tool" in roles
     assert executor.calls == [("read_file", {"path": "x.py"})]
-    # turn 1 (1) + turn 2 retries (_MAX_RETRIES) + forced-final (1)
-    assert call_count["n"] == 1 + router_mod._MAX_RETRIES + 1
+    # turn 1 (1) + turn 2 attempts (_MAX_ATTEMPTS) + forced-final (1)
+    assert call_count["n"] == 1 + router_mod._MAX_ATTEMPTS + 1
 
 
 def test_streaming_transient_error_retried(monkeypatch, minimal_config: ConfigSnapshot) -> None:

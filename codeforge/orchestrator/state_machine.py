@@ -1521,6 +1521,16 @@ class StateMachine:
             }
             next_state = _state_map.get(initial_state, initial_state)
 
+            # Re-entering the coding phase: restore the coder's per-invocation
+            # retry cushions so failures accumulated in a prior session don't
+            # consume retries the coder would have on a fresh coding invocation.
+            # Both "coding" and "code_review" reentry states map to next_state
+            # "coding" and trigger a fresh coder call, so both need the reset.
+            if next_state == "coding":
+                self.run.retry_counters = self.run.retry_counters.model_copy(
+                    update={"malformed_output": 0, "coder_low_confidence_reprompt": 0}
+                )
+
         while next_state != "done":
             if next_state == "architecture":
                 assert arch_doc is not None or next_state == "architecture"

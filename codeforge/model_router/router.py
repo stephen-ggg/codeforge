@@ -84,7 +84,7 @@ _SCRATCHPAD_INSTRUCTION = (
     "response. The JSON object must be the last content you produce."
 )
 
-_MAX_RETRIES: int = 3
+_MAX_ATTEMPTS: int = 3
 _BACKOFF_BASE: float = 1.0
 
 # Transient errors safe to retry on the same model. Everything else
@@ -105,7 +105,7 @@ def _with_backoff(
     *,
     agent_id: str,
     model: str,
-    max_retries: int = _MAX_RETRIES,
+    max_attempts: int = _MAX_ATTEMPTS,
     backoff_base: float = _BACKOFF_BASE,
 ) -> Any:
     """Call fn(), retrying on transient litellm errors with exponential backoff + jitter.
@@ -113,19 +113,19 @@ def _with_backoff(
     Non-transient errors propagate immediately without sleeping.
     On exhaustion re-raises the last transient error so complete() can fall to fallback.
     """
-    if max_retries < 1:
-        raise ValueError(f"max_retries must be >= 1, got {max_retries}")
-    for attempt in range(max_retries):
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+    for attempt in range(max_attempts):
         try:
             return fn()
         except _TRANSIENT_ERRORS as exc:
-            if attempt == max_retries - 1:
+            if attempt == max_attempts - 1:
                 raise
             delay = backoff_base * (2 ** attempt) + random.uniform(0, 0.2 * backoff_base)
             logger.warning(
                 "Router: agent=%s model=%s transient error (attempt %d/%d), "
                 "retrying in %.2fs: %s",
-                agent_id, model, attempt + 1, max_retries, delay, exc,
+                agent_id, model, attempt + 1, max_attempts, delay, exc,
             )
             time.sleep(delay)
 
@@ -343,6 +343,11 @@ class ModelRouter:
         thinking_chunks, text_chunks, last_chunk = _with_backoff(
             _once, agent_id=agent_id, model=model,
         )
+        if last_chunk is None:
+            raise RouterError(
+                agent_id, model,
+                ValueError("streaming completion returned no chunks"),
+            )
 
         thinking = "".join(thinking_chunks) or None
         text = "".join(text_chunks)
@@ -438,9 +443,12 @@ class ModelRouter:
         # Turn budget exhausted — force a final answer with no tools offered.
         logger.info("Tool loop budget exhausted for agent '%s'; forcing final answer.", agent_id)
         final_kwargs = {**base_kwargs, "messages": messages}
-        response = _with_backoff(
-            lambda: litellm.completion(**final_kwargs), agent_id=agent_id, model=model,
-        )
+        try:
+            response = _with_backoff(
+                lambda: litellm.completion(**final_kwargs), agent_id=agent_id, model=model,
+            )
+        except _TRANSIENT_ERRORS as exc:
+            raise RouterError(agent_id, model, exc) from exc
         result = self._normalise(response, model, agent_id)
         result.tool_calls = collected
         return result
