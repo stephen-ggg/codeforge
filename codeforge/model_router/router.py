@@ -35,11 +35,14 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import litellm  # noqa: PGH003
+from litellm import exceptions as _litellm_exc
 
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.schemas.contracts import AgentId
@@ -80,6 +83,51 @@ _SCRATCHPAD_INSTRUCTION = (
     "When you are done reasoning, output the JSON object as the final thing in your "
     "response. The JSON object must be the last content you produce."
 )
+
+_MAX_RETRIES: int = 3
+_BACKOFF_BASE: float = 1.0
+
+# Transient errors safe to retry on the same model. Everything else
+# (AuthenticationError, BadRequestError, PermissionDeniedError, etc.)
+# propagates immediately so complete() can fall through to the fallback model.
+_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+    _litellm_exc.RateLimitError,           # 429
+    _litellm_exc.ServiceUnavailableError,  # 503, Anthropic 529 overloaded
+    _litellm_exc.InternalServerError,      # 500
+    _litellm_exc.BadGatewayError,          # 502
+    _litellm_exc.APIConnectionError,       # network failures
+    _litellm_exc.Timeout,                  # read/connect timeouts
+)
+
+
+def _with_backoff(
+    fn: Callable[[], Any],
+    *,
+    agent_id: str,
+    model: str,
+    max_retries: int = _MAX_RETRIES,
+    backoff_base: float = _BACKOFF_BASE,
+) -> Any:
+    """Call fn(), retrying on transient litellm errors with exponential backoff + jitter.
+
+    Non-transient errors propagate immediately without sleeping.
+    On exhaustion re-raises the last transient error so complete() can fall to fallback.
+    """
+    if max_retries < 1:
+        raise ValueError(f"max_retries must be >= 1, got {max_retries}")
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except _TRANSIENT_ERRORS as exc:
+            if attempt == max_retries - 1:
+                raise
+            delay = backoff_base * (2 ** attempt) + random.uniform(0, 0.2 * backoff_base)
+            logger.warning(
+                "Router: agent=%s model=%s transient error (attempt %d/%d), "
+                "retrying in %.2fs: %s",
+                agent_id, model, attempt + 1, max_retries, delay, exc,
+            )
+            time.sleep(delay)
 
 
 @dataclass
@@ -261,7 +309,9 @@ class ModelRouter:
         if not tools and getattr(agent_config, "streaming", False):
             return self._stream_completion(kwargs, model, agent_id)
 
-        response = litellm.completion(**kwargs)
+        response = _with_backoff(
+            lambda: litellm.completion(**kwargs), agent_id=agent_id, model=model,
+        )
         return self._normalise(response, model, agent_id)
 
     def _stream_completion(
@@ -275,19 +325,24 @@ class ModelRouter:
         expose `.delta` (not `.message`), and usage/finish_reason only settle on the
         last chunk — so this builds RouterResult directly rather than via _normalise().
         """
-        thinking_chunks: list[str] = []
-        text_chunks: list[str] = []
-        last_chunk: Any = None
+        def _once() -> tuple[list[str], list[str], Any]:
+            tc: list[str] = []
+            tt: list[str] = []
+            lc: Any = None
+            for chunk in litellm.completion(**kwargs, stream=True):
+                lc = chunk
+                delta = chunk.choices[0].delta
+                rc = getattr(delta, "reasoning_content", None)
+                if rc:
+                    tc.append(rc)
+                c = getattr(delta, "content", None)
+                if c:
+                    tt.append(c)
+            return tc, tt, lc
 
-        for chunk in litellm.completion(**kwargs, stream=True):
-            last_chunk = chunk
-            delta = chunk.choices[0].delta
-            rc = getattr(delta, "reasoning_content", None)
-            if rc:
-                thinking_chunks.append(rc)
-            c = getattr(delta, "content", None)
-            if c:
-                text_chunks.append(c)
+        thinking_chunks, text_chunks, last_chunk = _with_backoff(
+            _once, agent_id=agent_id, model=model,
+        )
 
         thinking = "".join(thinking_chunks) or None
         text = "".join(text_chunks)
@@ -346,8 +401,18 @@ class ModelRouter:
         max_turns = int(getattr(tool_executor, "max_tool_turns", 12))
 
         for _ in range(max_turns):
-            kwargs = {**base_kwargs, "messages": messages, "tools": tools}
-            response = litellm.completion(**kwargs)
+            turn_kwargs = {**base_kwargs, "messages": messages, "tools": tools}
+            try:
+                response = _with_backoff(
+                    lambda: litellm.completion(**turn_kwargs), agent_id=agent_id, model=model,
+                )
+            except _TRANSIENT_ERRORS:
+                logger.warning(
+                    "Router: agent=%s model=%s retry budget exhausted mid-loop; "
+                    "forcing final answer with %d accumulated messages",
+                    agent_id, model, len(messages),
+                )
+                break
             call_id = self._call_id(response)
             collected.append({"litellm_call_id": call_id, "usage": self._usage(response)})
 
@@ -372,8 +437,10 @@ class ModelRouter:
 
         # Turn budget exhausted — force a final answer with no tools offered.
         logger.info("Tool loop budget exhausted for agent '%s'; forcing final answer.", agent_id)
-        kwargs = {**base_kwargs, "messages": messages}
-        response = litellm.completion(**kwargs)
+        final_kwargs = {**base_kwargs, "messages": messages}
+        response = _with_backoff(
+            lambda: litellm.completion(**final_kwargs), agent_id=agent_id, model=model,
+        )
         result = self._normalise(response, model, agent_id)
         result.tool_calls = collected
         return result

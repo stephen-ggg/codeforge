@@ -186,3 +186,321 @@ def test_no_tools_path_is_single_shot(monkeypatch, minimal_config: ConfigSnapsho
     assert calls["n"] == 1
     assert result.tool_calls == []
     assert result.content == '{"output": {}, "confidence": 1.0}'
+
+
+# ---------------------------------------------------------------------------
+# Exponential backoff tests
+# ---------------------------------------------------------------------------
+
+from litellm.exceptions import (  # noqa: E402
+    AuthenticationError,
+    InternalServerError,
+    RateLimitError,
+    ServiceUnavailableError,
+)
+
+from codeforge.model_router.router import RouterError
+
+
+def _config_with_fallback(base: ConfigSnapshot, agent_id: str, fallback: str) -> ConfigSnapshot:
+    agents = dict(base.agents)
+    agents[agent_id] = agents[agent_id].model_copy(update={"fallback_model": fallback})
+    return base.model_copy(update={"agents": agents})
+
+
+def test_backoff_retries_transient_then_succeeds(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """Two ServiceUnavailableError calls followed by success — 3 calls total, 2 sleeps."""
+    # Use code_reviewer: non-streaming, so _response() is the right return shape.
+    call_count = {"n": 0}
+    sleep_calls: list[float] = []
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            raise ServiceUnavailableError(
+                message="overloaded", llm_provider="anthropic", model="claude-sonnet-4-6",
+            )
+        return _response(_msg('{"output": {}, "confidence": 0.9}'), "ok")
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
+
+    assert call_count["n"] == 3
+    assert len(sleep_calls) == 2
+    assert sleep_calls[0] < sleep_calls[1]  # delays grow
+    assert result.content == '{"output": {}, "confidence": 0.9}'
+
+
+def test_non_transient_error_skips_backoff(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """AuthenticationError is not transient — must raise immediately with no sleep."""
+    call_count = {"n": 0}
+    sleep_calls: list[float] = []
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        raise AuthenticationError(
+            message="invalid key", llm_provider="anthropic", model="claude-sonnet-4-6",
+        )
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+
+    router = ModelRouter(minimal_config)
+    with pytest.raises(RouterError):
+        router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
+
+    assert call_count["n"] == 1
+    assert sleep_calls == []
+
+
+def test_rate_limit_error_is_retried(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """RateLimitError (429) is in the transient set and must trigger backoff."""
+    call_count = {"n": 0}
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise RateLimitError(
+                message="rate limit", llm_provider="anthropic", model="claude-sonnet-4-6",
+            )
+        return _response(_msg('{"output": {}, "confidence": 0.9}'), "ok")
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: None)
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
+
+    assert call_count["n"] == 2
+    assert result.content == '{"output": {}, "confidence": 0.9}'
+
+
+def test_internal_server_error_is_retried(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """InternalServerError (500) is in the transient set and must trigger backoff."""
+    call_count = {"n": 0}
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 2:
+            raise InternalServerError(
+                message="internal error", llm_provider="anthropic", model="claude-sonnet-4-6",
+            )
+        return _response(_msg('{"output": {}, "confidence": 0.9}'), "ok")
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: None)
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
+
+    assert call_count["n"] == 2
+    assert result.content == '{"output": {}, "confidence": 0.9}'
+
+
+def test_backoff_exhausted_falls_to_fallback_model(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """Primary exhausts all 3 retries with ServiceUnavailableError; fallback succeeds."""
+    # code_reviewer (claude-sonnet-4-6) → fallback haiku; both are non-streaming.
+    config = _config_with_fallback(minimal_config, "code_reviewer", "claude-haiku-4-5-20251001")
+    primary_calls = {"n": 0}
+    fallback_calls = {"n": 0}
+    sleep_calls: list[float] = []
+
+    def fake_completion(**kwargs):
+        model = kwargs.get("model", "")
+        if "sonnet" in model:
+            primary_calls["n"] += 1
+            raise ServiceUnavailableError(
+                message="overloaded", llm_provider="anthropic", model=model,
+            )
+        else:
+            fallback_calls["n"] += 1
+            return _response(_msg('{"output": {}, "confidence": 0.7}'), "fb-ok")
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+
+    router = ModelRouter(config)
+    result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
+
+    assert primary_calls["n"] == router_mod._MAX_RETRIES
+    assert fallback_calls["n"] == 1
+    assert len(sleep_calls) == router_mod._MAX_RETRIES - 1
+    assert result.model_used == "claude-haiku-4-5-20251001"
+    assert result.content == '{"output": {}, "confidence": 0.7}'
+
+
+def test_backoff_all_exhausted_raises_router_error(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """Both primary and fallback exhaust retries — RouterError raised."""
+    config = _config_with_fallback(minimal_config, "code_reviewer", "claude-haiku-4-5-20251001")
+    call_count = {"n": 0}
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        raise ServiceUnavailableError(
+            message="overloaded", llm_provider="anthropic", model=kwargs.get("model", ""),
+        )
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: None)
+
+    router = ModelRouter(config)
+    with pytest.raises(RouterError):
+        router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
+
+    assert call_count["n"] == router_mod._MAX_RETRIES * 2
+
+
+def test_tool_loop_backoff_per_individual_call(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """Backoff applies per litellm.completion() call inside the tool loop.
+
+    Turn 1: fails twice (transient), then succeeds returning a tool_use.
+    Turn 2: succeeds immediately returning final JSON.
+    Expected: 4 total completion calls, 2 sleeps, executor called once.
+    """
+    call_count = {"n": 0}
+    sleep_calls: list[float] = []
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] <= 2:
+            raise ServiceUnavailableError(
+                message="overloaded", llm_provider="anthropic", model="claude-opus-4-8",
+            )
+        if call_count["n"] == 3:
+            return _response(
+                _msg("", [_tool_call("tc1", "read_file", '{"path": "x.py"}')]), "t1",
+            )
+        return _response(_msg('{"output": {}, "confidence": 0.9}'), "t2")
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+
+    executor = FakeExecutor()
+    router = ModelRouter(minimal_config)
+    result = router.complete(
+        agent_id="coder",
+        system_prompt="s",
+        user_turn="u",
+        run_id="r",
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        tool_executor=executor,
+    )
+
+    assert call_count["n"] == 4
+    assert len(sleep_calls) == 2
+    assert executor.calls == [("read_file", {"path": "x.py"})]
+    assert result.content == '{"output": {}, "confidence": 0.9}'
+
+
+def test_streaming_mid_iteration_error_retried(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """ServiceUnavailableError raised during chunk iteration triggers a full stream retry.
+
+    The partial chunks from the first attempt must be discarded — _once() resets
+    accumulators on each retry so the result only reflects the successful attempt.
+    """
+    call_count = {"n": 0}
+    sleep_calls: list[float] = []
+
+    def bad_stream():
+        yield _chunk(content='{"partial":')
+        raise ServiceUnavailableError(
+            message="mid-stream drop", llm_provider="anthropic", model="claude-opus-4-8",
+        )
+
+    good_chunks = [
+        _chunk(content='{"output": {}, "confidence": 0.9}'),
+        _chunk(finish_reason="stop", call_id="ok"),
+    ]
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        return bad_stream() if call_count["n"] == 1 else iter(good_chunks)
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
+
+    assert call_count["n"] == 2
+    assert len(sleep_calls) == 1
+    # Only the successful stream's content — partial chunk from first attempt is gone.
+    assert result.content == '{"output": {}, "confidence": 0.9}'
+
+
+def test_tool_loop_retry_exhaustion_falls_to_forced_final(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """Retry exhaustion mid-tool-loop breaks to forced-final with accumulated context.
+
+    Turn 1: succeeds (returns tool_use). Turn 2: all retries fail. The loop breaks
+    and the forced-final-answer call receives the accumulated messages including the
+    tool result from turn 1.
+    """
+    call_count = {"n": 0}
+    forced_final_messages: list[dict] = []
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        n = call_count["n"]
+        if n == 1:
+            return _response(
+                _msg("", [_tool_call("tc1", "read_file", '{"path": "x.py"}')]), "t1",
+            )
+        if n <= 1 + router_mod._MAX_RETRIES:
+            raise ServiceUnavailableError(
+                message="overloaded", llm_provider="anthropic", model="claude-opus-4-8",
+            )
+        forced_final_messages.extend(kwargs["messages"])
+        return _response(_msg('{"output": {}, "confidence": 0.9}'), "final")
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: None)
+
+    executor = FakeExecutor()
+    router = ModelRouter(minimal_config)
+    result = router.complete(
+        agent_id="coder",
+        system_prompt="s",
+        user_turn="u",
+        run_id="r",
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        tool_executor=executor,
+    )
+
+    assert result.content == '{"output": {}, "confidence": 0.9}'
+    # Forced-final received accumulated context including turn 1's tool result.
+    roles = [m["role"] for m in forced_final_messages]
+    assert "tool" in roles
+    assert executor.calls == [("read_file", {"path": "x.py"})]
+    # turn 1 (1) + turn 2 retries (_MAX_RETRIES) + forced-final (1)
+    assert call_count["n"] == 1 + router_mod._MAX_RETRIES + 1
+
+
+def test_streaming_transient_error_retried(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """ServiceUnavailableError on first stream creation triggers retry; second succeeds."""
+    call_count = {"n": 0}
+    sleep_calls: list[float] = []
+    chunks = [
+        _chunk(content='{"output": {}, "confidence": 0.9}'),
+        _chunk(finish_reason="stop", call_id="stream-ok"),
+    ]
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ServiceUnavailableError(
+                message="overloaded", llm_provider="anthropic", model="claude-opus-4-8",
+            )
+        return iter(chunks)
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
+
+    assert call_count["n"] == 2
+    assert len(sleep_calls) == 1
+    assert result.content == '{"output": {}, "confidence": 0.9}'
