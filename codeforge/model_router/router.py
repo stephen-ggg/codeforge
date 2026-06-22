@@ -35,11 +35,14 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import litellm  # noqa: PGH003
+from litellm import exceptions as _litellm_exc
 
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.schemas.contracts import AgentId
@@ -80,6 +83,68 @@ _SCRATCHPAD_INSTRUCTION = (
     "When you are done reasoning, output the JSON object as the final thing in your "
     "response. The JSON object must be the last content you produce."
 )
+
+_MAX_ATTEMPTS: int = 5
+_BACKOFF_BASE: float = 2.0
+
+# Transient errors safe to retry on the same model. Everything else
+# (AuthenticationError, BadRequestError, PermissionDeniedError, etc.)
+# propagates immediately so complete() can fall through to the fallback model.
+_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+    _litellm_exc.RateLimitError,           # 429
+    _litellm_exc.ServiceUnavailableError,  # 503, Anthropic 529 overloaded
+    _litellm_exc.InternalServerError,      # 500
+    _litellm_exc.BadGatewayError,          # 502
+    _litellm_exc.APIConnectionError,       # network failures
+    _litellm_exc.Timeout,                  # read/connect timeouts
+)
+
+
+def _retry_after(exc: Exception) -> float:
+    """Return the Retry-After delay in seconds from a litellm exception, or 0."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return 0.0
+    headers = getattr(response, "headers", {}) or {}
+    val = headers.get("Retry-After") or headers.get("retry-after")
+    if val is None:
+        return 0.0
+    try:
+        return max(0.0, float(val))
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _with_backoff(
+    fn: Callable[[], Any],
+    *,
+    agent_id: str,
+    model: str,
+    max_attempts: int = _MAX_ATTEMPTS,
+    backoff_base: float = _BACKOFF_BASE,
+) -> Any:
+    """Call fn(), retrying on transient litellm errors with exponential backoff + jitter.
+
+    Non-transient errors propagate immediately without sleeping.
+    On exhaustion re-raises the last transient error so complete() can fall to fallback.
+    Honors Retry-After headers when present (e.g. on 429 rate-limit responses).
+    """
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except _TRANSIENT_ERRORS as exc:
+            if attempt == max_attempts - 1:
+                raise
+            computed = backoff_base * (2 ** attempt) + random.uniform(0, 0.2 * backoff_base)
+            delay = max(computed, _retry_after(exc))
+            logger.warning(
+                "Router: agent=%s model=%s transient error (attempt %d/%d), "
+                "retrying in %.2fs: %s",
+                agent_id, model, attempt + 1, max_attempts, delay, exc,
+            )
+            time.sleep(delay)
 
 
 @dataclass
@@ -261,7 +326,9 @@ class ModelRouter:
         if not tools and getattr(agent_config, "streaming", False):
             return self._stream_completion(kwargs, model, agent_id)
 
-        response = litellm.completion(**kwargs)
+        response = _with_backoff(
+            lambda: litellm.completion(**kwargs), agent_id=agent_id, model=model,
+        )
         return self._normalise(response, model, agent_id)
 
     def _stream_completion(
@@ -279,15 +346,42 @@ class ModelRouter:
         text_chunks: list[str] = []
         last_chunk: Any = None
 
-        for chunk in litellm.completion(**kwargs, stream=True):
-            last_chunk = chunk
-            delta = chunk.choices[0].delta
-            rc = getattr(delta, "reasoning_content", None)
-            if rc:
-                thinking_chunks.append(rc)
-            c = getattr(delta, "content", None)
-            if c:
-                text_chunks.append(c)
+        for attempt in range(_MAX_ATTEMPTS):
+            thinking_chunks = []
+            text_chunks = []
+            last_chunk = None
+            try:
+                for chunk in litellm.completion(**kwargs, stream=True):
+                    last_chunk = chunk
+                    delta = chunk.choices[0].delta
+                    rc = getattr(delta, "reasoning_content", None)
+                    if rc:
+                        thinking_chunks.append(rc)
+                    c = getattr(delta, "content", None)
+                    if c:
+                        text_chunks.append(c)
+                break  # stream completed successfully
+            except _TRANSIENT_ERRORS as exc:
+                if last_chunk is not None:
+                    # Mid-stream failure: re-requesting from scratch would re-bill
+                    # the full token budget (including expensive thinking tokens).
+                    raise
+                if attempt == _MAX_ATTEMPTS - 1:
+                    raise
+                computed = _BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 0.2 * _BACKOFF_BASE)
+                delay = max(computed, _retry_after(exc))
+                logger.warning(
+                    "Router(stream): agent=%s model=%s transient error before first chunk "
+                    "(attempt %d/%d), retrying in %.2fs: %s",
+                    agent_id, model, attempt + 1, _MAX_ATTEMPTS, delay, exc,
+                )
+                time.sleep(delay)
+
+        if last_chunk is None:
+            raise RouterError(
+                agent_id, model,
+                ValueError("streaming completion returned no chunks"),
+            )
 
         thinking = "".join(thinking_chunks) or None
         text = "".join(text_chunks)
@@ -344,10 +438,22 @@ class ModelRouter:
         messages: list[dict[str, Any]] = list(base_kwargs["messages"])
         collected: list[dict[str, Any]] = []
         max_turns = int(getattr(tool_executor, "max_tool_turns", 12))
+        transient_exhausted = False
 
         for _ in range(max_turns):
-            kwargs = {**base_kwargs, "messages": messages, "tools": tools}
-            response = litellm.completion(**kwargs)
+            turn_kwargs = {**base_kwargs, "messages": messages, "tools": tools}
+            try:
+                response = _with_backoff(
+                    lambda: litellm.completion(**turn_kwargs), agent_id=agent_id, model=model,
+                )
+            except _TRANSIENT_ERRORS:
+                transient_exhausted = True
+                logger.warning(
+                    "Router: agent=%s model=%s retry budget exhausted mid-loop after %d attempts; "
+                    "costs from failed retries not recorded in tool_calls",
+                    agent_id, model, _MAX_ATTEMPTS,
+                )
+                break
             call_id = self._call_id(response)
             collected.append({"litellm_call_id": call_id, "usage": self._usage(response)})
 
@@ -370,10 +476,22 @@ class ModelRouter:
                     {"role": "tool", "tool_call_id": tc.id, "content": tool_result}
                 )
 
-        # Turn budget exhausted — force a final answer with no tools offered.
-        logger.info("Tool loop budget exhausted for agent '%s'; forcing final answer.", agent_id)
-        kwargs = {**base_kwargs, "messages": messages}
-        response = litellm.completion(**kwargs)
+        # Turn budget or retry budget exhausted — force a final answer with no tools offered.
+        if transient_exhausted:
+            logger.warning(
+                "Router: agent=%s model=%s forcing final answer after transient-error exhaustion "
+                "with %d accumulated messages",
+                agent_id, model, len(messages),
+            )
+        else:
+            logger.info("Tool loop budget exhausted for agent '%s'; forcing final answer.", agent_id)
+        final_kwargs = {**base_kwargs, "messages": messages}
+        try:
+            response = _with_backoff(
+                lambda: litellm.completion(**final_kwargs), agent_id=agent_id, model=model,
+            )
+        except _TRANSIENT_ERRORS as exc:
+            raise RouterError(agent_id, model, exc) from exc
         result = self._normalise(response, model, agent_id)
         result.tool_calls = collected
         return result
@@ -393,6 +511,7 @@ class ModelRouter:
             "messages": messages,
             "max_tokens": max_tokens,
             "metadata": metadata,
+            "num_retries": 0,  # _with_backoff owns retry logic; prevents silent compounding
         }
         if api_key:
             kwargs["api_key"] = api_key
