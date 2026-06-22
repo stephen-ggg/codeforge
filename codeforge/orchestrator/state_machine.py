@@ -1698,7 +1698,7 @@ class StateMachine:
                         if recovery.decision == "escalate":
                             self._escalate(recovery.escalation_reason or "human_required")
                         if recovery.next_state == "coding":
-                            dep_fix_context = _build_dep_fix_context(runner_results)
+                            dep_fix_context = _build_dep_fix_context(runner_results, prev_code_art=code_art)
                             next_state = "coding"
                         else:  # test_design
                             env_fix_context = _build_env_fix_context(analysis)
@@ -1890,7 +1890,10 @@ def _build_env_fix_context(analysis: "TestAnalysis") -> dict[str, Any]:
     }
 
 
-def _build_dep_fix_context(runner_results: Any) -> dict[str, Any]:
+def _build_dep_fix_context(
+    runner_results: Any,
+    prev_code_art: CodeArtifact | None = None,
+) -> dict[str, Any]:
     """
     Build the dep_fix_context passed back to the coder to repair a runner failure the coder
     owns: a runtime-dependency failure (bad/missing package in the manifest) or a build /
@@ -1898,11 +1901,21 @@ def _build_dep_fix_context(runner_results: Any) -> dict[str, Any]:
 
     No firewall projection needed: the coder owns the dependency manifest and source, and the
     runner stderr is its own build output (install/compiler), not another agent's artifact.
+
+    prev_code_art: the coder's most recent CodeArtifact. Its file list is included so the
+    second-pass coder knows what it had already planned — tool reads return pre-change disk
+    state and cannot reveal these planned-but-not-yet-committed files.
     """
     error_phase = getattr(runner_results, "error_phase", None)
     trigger = "build_error" if error_phase == "build_failed" else "runtime_dep_error"
-    return {
+    ctx: dict[str, Any] = {
         "trigger": trigger,
         "error_phase": error_phase,
         "stderr_tail": getattr(runner_results, "stderr_tail", ""),
     }
+    if prev_code_art is not None:
+        ctx["previous_files"] = [
+            {"path": f.path, "change_type": f.change_type}
+            for f in prev_code_art.files
+        ]
+    return ctx

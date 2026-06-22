@@ -54,9 +54,22 @@ the tests import against.
   manifest — leave feature logic untouched unless the stderr shows your code imports a package
   you forgot to declare.
 - **`dep_fix_context`** (trigger `build_error`) — the compile/type-check gate failed before
-  tests ran (e.g. a TypeScript type error). Read `stderr_tail` and fix the offending source so
-  it compiles/type-checks cleanly. Do not weaken types to silence the checker; fix the actual
-  defect.
+  tests ran. Read `stderr_tail`, identify the single file or import that is broken, and fix
+  only that. Scope constraints that are hard limits:
+  - Fix only files already in your previous `files[]` output, or the specific file named in
+    `stderr_tail` if it differs.
+  - Do NOT add files with `change_type: "new"` unless `stderr_tail` explicitly names a
+    missing file that the architecture requires and that you failed to emit in your first pass.
+  - Do NOT touch files outside the feature scope (layout files, root config files, unrelated
+    components). If the build error implicates an unrelated file, note it in `assumptions_made`
+    and leave that file alone.
+  - `previous_files` lists the paths and change-types your previous pass planned. Treat these
+    as your own prior work. Note that these files are NOT yet on disk — tool reads will return
+    pre-change state. Use `previous_files` (not tool results) to know what your prior pass was
+    doing, and restrict your changes to that scope.
+  - If `stderr_tail` alone is insufficient to locate the break, use `search_code` or
+    `read_file` to inspect the relevant file before writing anything.
+  - Do not weaken types to silence the checker; fix the actual defect.
 
 ## Continuation mode (adding a feature to an existing codebase)
 
