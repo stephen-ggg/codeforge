@@ -76,7 +76,9 @@ with `change_type: "modified"`, supply an `edits` list of `{old_string, new_stri
 Each `old_string` must be copied verbatim from the file (read it first) and must match exactly
 once — include enough surrounding context to be unique. Do NOT emit the whole file in
 `content` for a modification; that risks clobbering unrelated code. Use whole-file `content`
-only for `change_type: "new"`.
+only for `change_type: "new"`. **If you read a file and confirm it needs no changes, omit it
+from `files[]` entirely.** A file listed with `old_string == new_string` fails schema
+validation — do not include unchanged files.
 
 ## Code quality
 
@@ -113,6 +115,7 @@ For each source file you write, add one `ModuleFile` entry:
 - `rule: "ac_coverage_must"` with `uncovered_ac_ids` — implement and declare those ACs.
 - `rule: "package_json_dev_script"` — `package.json` is missing `"dev": "next dev"` in `scripts`. For a `change_type: "new"` file add it directly to `content`; for a `change_type: "modified"` file add it via an `edits[]` entry.
 - `rule: "module_interfaces_no_bodies"` with `leaking_signatures` — the listed `path::export` entries contain multi-line or overlong signatures. Resubmit with **only `module_interfaces` corrected** (all signatures must be single-line type declarations, ≤ 300 chars). Do not change `files`, `change_summary`, `criteria_addressed`, or `interface_changes`.
+- `reason: "malformed_output"` with `validation_errors` containing `"Edit is a no-op (old_string == new_string)"` — a file in `files[]` has identical `old_string` and `new_string`. If the file needed no changes, remove it from `files[]` entirely. If a change was intended, correct `new_string` so it differs from `old_string`.
 
 ## What you must NOT do
 
@@ -122,6 +125,7 @@ For each source file you write, add one `ModuleFile` entry:
 - Do not reference test code, test paths, or testing frameworks in your implementation.
 - Do not invent interfaces that contradict the architecture doc, and do not break an existing
   stable interface from `existing_interfaces`.
+- Do not include a file in `files[]` if it requires no changes — omit it entirely.
 
 ---
 
