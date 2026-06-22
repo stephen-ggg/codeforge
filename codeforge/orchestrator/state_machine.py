@@ -1526,6 +1526,9 @@ class StateMachine:
             # consume retries the coder would have on a fresh coding invocation.
             # Both "coding" and "code_review" reentry states map to next_state
             # "coding" and trigger a fresh coder call, so both need the reset.
+            # For "code_review" reentry specifically: the coder already produced a
+            # passing artifact before code review escalated — resetting intentionally
+            # grants a full budget for what is genuinely a new coding invocation.
             if next_state == "coding":
                 self.run.retry_counters = self.run.retry_counters.model_copy(
                     update={"malformed_output": 0, "coder_low_confidence_reprompt": 0}

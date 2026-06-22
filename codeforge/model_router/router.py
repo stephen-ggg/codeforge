@@ -84,8 +84,8 @@ _SCRATCHPAD_INSTRUCTION = (
     "response. The JSON object must be the last content you produce."
 )
 
-_MAX_ATTEMPTS: int = 3
-_BACKOFF_BASE: float = 1.0
+_MAX_ATTEMPTS: int = 5
+_BACKOFF_BASE: float = 2.0
 
 # Transient errors safe to retry on the same model. Everything else
 # (AuthenticationError, BadRequestError, PermissionDeniedError, etc.)
@@ -100,6 +100,21 @@ _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
 )
 
 
+def _retry_after(exc: Exception) -> float:
+    """Return the Retry-After delay in seconds from a litellm exception, or 0."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return 0.0
+    headers = getattr(response, "headers", {}) or {}
+    val = headers.get("Retry-After") or headers.get("retry-after")
+    if val is None:
+        return 0.0
+    try:
+        return max(0.0, float(val))
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _with_backoff(
     fn: Callable[[], Any],
     *,
@@ -112,6 +127,7 @@ def _with_backoff(
 
     Non-transient errors propagate immediately without sleeping.
     On exhaustion re-raises the last transient error so complete() can fall to fallback.
+    Honors Retry-After headers when present (e.g. on 429 rate-limit responses).
     """
     if max_attempts < 1:
         raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
@@ -121,7 +137,8 @@ def _with_backoff(
         except _TRANSIENT_ERRORS as exc:
             if attempt == max_attempts - 1:
                 raise
-            delay = backoff_base * (2 ** attempt) + random.uniform(0, 0.2 * backoff_base)
+            computed = backoff_base * (2 ** attempt) + random.uniform(0, 0.2 * backoff_base)
+            delay = max(computed, _retry_after(exc))
             logger.warning(
                 "Router: agent=%s model=%s transient error (attempt %d/%d), "
                 "retrying in %.2fs: %s",
@@ -325,24 +342,41 @@ class ModelRouter:
         expose `.delta` (not `.message`), and usage/finish_reason only settle on the
         last chunk — so this builds RouterResult directly rather than via _normalise().
         """
-        def _once() -> tuple[list[str], list[str], Any]:
-            tc: list[str] = []
-            tt: list[str] = []
-            lc: Any = None
-            for chunk in litellm.completion(**kwargs, stream=True):
-                lc = chunk
-                delta = chunk.choices[0].delta
-                rc = getattr(delta, "reasoning_content", None)
-                if rc:
-                    tc.append(rc)
-                c = getattr(delta, "content", None)
-                if c:
-                    tt.append(c)
-            return tc, tt, lc
+        thinking_chunks: list[str] = []
+        text_chunks: list[str] = []
+        last_chunk: Any = None
 
-        thinking_chunks, text_chunks, last_chunk = _with_backoff(
-            _once, agent_id=agent_id, model=model,
-        )
+        for attempt in range(_MAX_ATTEMPTS):
+            thinking_chunks = []
+            text_chunks = []
+            last_chunk = None
+            try:
+                for chunk in litellm.completion(**kwargs, stream=True):
+                    last_chunk = chunk
+                    delta = chunk.choices[0].delta
+                    rc = getattr(delta, "reasoning_content", None)
+                    if rc:
+                        thinking_chunks.append(rc)
+                    c = getattr(delta, "content", None)
+                    if c:
+                        text_chunks.append(c)
+                break  # stream completed successfully
+            except _TRANSIENT_ERRORS as exc:
+                if last_chunk is not None:
+                    # Mid-stream failure: re-requesting from scratch would re-bill
+                    # the full token budget (including expensive thinking tokens).
+                    raise
+                if attempt == _MAX_ATTEMPTS - 1:
+                    raise
+                computed = _BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 0.2 * _BACKOFF_BASE)
+                delay = max(computed, _retry_after(exc))
+                logger.warning(
+                    "Router(stream): agent=%s model=%s transient error before first chunk "
+                    "(attempt %d/%d), retrying in %.2fs: %s",
+                    agent_id, model, attempt + 1, _MAX_ATTEMPTS, delay, exc,
+                )
+                time.sleep(delay)
+
         if last_chunk is None:
             raise RouterError(
                 agent_id, model,
@@ -404,6 +438,7 @@ class ModelRouter:
         messages: list[dict[str, Any]] = list(base_kwargs["messages"])
         collected: list[dict[str, Any]] = []
         max_turns = int(getattr(tool_executor, "max_tool_turns", 12))
+        transient_exhausted = False
 
         for _ in range(max_turns):
             turn_kwargs = {**base_kwargs, "messages": messages, "tools": tools}
@@ -412,10 +447,11 @@ class ModelRouter:
                     lambda: litellm.completion(**turn_kwargs), agent_id=agent_id, model=model,
                 )
             except _TRANSIENT_ERRORS:
+                transient_exhausted = True
                 logger.warning(
-                    "Router: agent=%s model=%s retry budget exhausted mid-loop; "
-                    "forcing final answer with %d accumulated messages",
-                    agent_id, model, len(messages),
+                    "Router: agent=%s model=%s retry budget exhausted mid-loop after %d attempts; "
+                    "costs from failed retries not recorded in tool_calls",
+                    agent_id, model, _MAX_ATTEMPTS,
                 )
                 break
             call_id = self._call_id(response)
@@ -440,8 +476,15 @@ class ModelRouter:
                     {"role": "tool", "tool_call_id": tc.id, "content": tool_result}
                 )
 
-        # Turn budget exhausted — force a final answer with no tools offered.
-        logger.info("Tool loop budget exhausted for agent '%s'; forcing final answer.", agent_id)
+        # Turn budget or retry budget exhausted — force a final answer with no tools offered.
+        if transient_exhausted:
+            logger.warning(
+                "Router: agent=%s model=%s forcing final answer after transient-error exhaustion "
+                "with %d accumulated messages",
+                agent_id, model, len(messages),
+            )
+        else:
+            logger.info("Tool loop budget exhausted for agent '%s'; forcing final answer.", agent_id)
         final_kwargs = {**base_kwargs, "messages": messages}
         try:
             response = _with_backoff(
@@ -468,6 +511,7 @@ class ModelRouter:
             "messages": messages,
             "max_tokens": max_tokens,
             "metadata": metadata,
+            "num_retries": 0,  # _with_backoff owns retry logic; prevents silent compounding
         }
         if api_key:
             kwargs["api_key"] = api_key

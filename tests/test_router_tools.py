@@ -209,7 +209,10 @@ def _config_with_fallback(base: ConfigSnapshot, agent_id: str, fallback: str) ->
 
 
 def test_backoff_retries_transient_then_succeeds(monkeypatch, minimal_config: ConfigSnapshot) -> None:
-    """Two ServiceUnavailableError calls followed by success — 3 calls total, 2 sleeps."""
+    """Two ServiceUnavailableError calls followed by success — 3 calls total, 2 sleeps.
+
+    Succeeds on attempt 3 (well within _MAX_ATTEMPTS) so budget is not relevant here.
+    """
     # Use code_reviewer: non-streaming, so _response() is the right return shape.
     call_count = {"n": 0}
     sleep_calls: list[float] = []
@@ -278,6 +281,32 @@ def test_rate_limit_error_is_retried(monkeypatch, minimal_config: ConfigSnapshot
     assert result.content == '{"output": {}, "confidence": 0.9}'
 
 
+def test_retry_after_header_honored(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """When _retry_after() returns a value larger than the computed backoff, it wins."""
+    sleep_calls: list[float] = []
+    call_count = {"n": 0}
+
+    def fake_completion(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RateLimitError(
+                message="rate limit", llm_provider="anthropic", model="claude-sonnet-4-6",
+            )
+        return _response(_msg('{"output": {}, "confidence": 0.9}'), "ok")
+
+    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(router_mod, "_retry_after", lambda exc: 30.0)
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
+
+    assert call_count["n"] == 2
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] >= 30.0  # Retry-After value overrides computed exponential delay
+    assert result.content == '{"output": {}, "confidence": 0.9}'
+
+
 def test_internal_server_error_is_retried(monkeypatch, minimal_config: ConfigSnapshot) -> None:
     """InternalServerError (500) is in the transient set and must trigger backoff."""
     call_count = {"n": 0}
@@ -301,7 +330,7 @@ def test_internal_server_error_is_retried(monkeypatch, minimal_config: ConfigSna
 
 
 def test_backoff_exhausted_falls_to_fallback_model(monkeypatch, minimal_config: ConfigSnapshot) -> None:
-    """Primary exhausts all 3 retries with ServiceUnavailableError; fallback succeeds."""
+    """Primary exhausts all _MAX_ATTEMPTS retries with ServiceUnavailableError; fallback succeeds."""
     # code_reviewer (claude-sonnet-4-6) → fallback haiku; both are non-streaming.
     config = _config_with_fallback(minimal_config, "code_reviewer", "claude-haiku-4-5-20251001")
     primary_calls = {"n": 0}
@@ -395,11 +424,11 @@ def test_tool_loop_backoff_per_individual_call(monkeypatch, minimal_config: Conf
     assert result.content == '{"output": {}, "confidence": 0.9}'
 
 
-def test_streaming_mid_iteration_error_retried(monkeypatch, minimal_config: ConfigSnapshot) -> None:
-    """ServiceUnavailableError raised during chunk iteration triggers a full stream retry.
+def test_streaming_mid_iteration_error_not_retried(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """ServiceUnavailableError raised mid-stream (after ≥1 chunk) is NOT retried.
 
-    The partial chunks from the first attempt must be discarded — _once() resets
-    accumulators on each retry so the result only reflects the successful attempt.
+    Retrying would re-request from token 0, re-billing the full token budget including
+    expensive thinking tokens. The error propagates immediately instead.
     """
     call_count = {"n": 0}
     sleep_calls: list[float] = []
@@ -410,25 +439,19 @@ def test_streaming_mid_iteration_error_retried(monkeypatch, minimal_config: Conf
             message="mid-stream drop", llm_provider="anthropic", model="claude-opus-4-8",
         )
 
-    good_chunks = [
-        _chunk(content='{"output": {}, "confidence": 0.9}'),
-        _chunk(finish_reason="stop", call_id="ok"),
-    ]
-
     def fake_completion(**kwargs):
         call_count["n"] += 1
-        return bad_stream() if call_count["n"] == 1 else iter(good_chunks)
+        return bad_stream()
 
     monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
     monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
 
     router = ModelRouter(minimal_config)
-    result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
+    with pytest.raises(RouterError):
+        router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
 
-    assert call_count["n"] == 2
-    assert len(sleep_calls) == 1
-    # Only the successful stream's content — partial chunk from first attempt is gone.
-    assert result.content == '{"output": {}, "confidence": 0.9}'
+    assert call_count["n"] == 1  # no retry after mid-stream failure
+    assert sleep_calls == []
 
 
 def test_tool_loop_retry_exhaustion_falls_to_forced_final(monkeypatch, minimal_config: ConfigSnapshot) -> None:
