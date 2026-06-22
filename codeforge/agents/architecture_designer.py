@@ -48,6 +48,7 @@ class ArchitectureDesignerAgent(BaseAgent):
             "tech_stack_md": state.get("tech_stack"),
             "feature_registry_md": state.get("feature_registry"),
             "spec_gap_context": json.loads(state.get("_spec_gap_context", "null")),
+            "ui_design_md": state.get("ui_design"),
         }
 
         if reprompt is not None:

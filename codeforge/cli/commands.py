@@ -370,11 +370,17 @@ def run(
         help="Path to the managed project directory (contains .codeforge/).",
         show_default=False,
     ),
-    brief: str = typer.Option(
-        ...,
+    brief: Optional[str] = typer.Option(
+        None,
         "--brief",
         "-b",
-        help="One-sentence feature brief passed to the requirements analyst.",
+        help="Feature brief passed to the requirements analyst (inline string).",
+        show_default=False,
+    ),
+    brief_file: Optional[Path] = typer.Option(
+        None,
+        "--brief-file",
+        help="Path to a file whose contents are used as the feature brief. Mutually exclusive with --brief.",
         show_default=False,
     ),
     run_mode: RunMode = typer.Option(
@@ -404,6 +410,24 @@ def run(
                     current code and emit diff-based edits. Requires the repos block
                     in .codeforge/codeforge.config.yaml.
     """
+    if brief is not None and brief_file is not None:
+        typer.echo("Error: --brief and --brief-file are mutually exclusive.", err=True)
+        raise typer.Exit(1)
+    if brief is None and brief_file is None:
+        typer.echo("Error: one of --brief or --brief-file is required.", err=True)
+        raise typer.Exit(1)
+
+    if brief_file is not None:
+        if not brief_file.exists():
+            typer.echo(f"Error: brief file not found: {brief_file}", err=True)
+            raise typer.Exit(1)
+        resolved_brief = brief_file.read_text(encoding="utf-8").strip()
+        if not resolved_brief:
+            typer.echo(f"Error: brief file is empty: {brief_file}", err=True)
+            raise typer.Exit(1)
+    else:
+        resolved_brief = brief  # type: ignore[assignment]
+
     config = _load_config_or_exit(project_dir)
     lock = CodeforgeLock(project_dir)
     human = HumanInteraction()
@@ -418,11 +442,11 @@ def run(
     sm = StateMachine(config, project_dir, run_log_dir)
 
     try:
-        codeforge_run = sm.start_run(run_mode.value, brief)
-        _save_brief(run_log_dir, codeforge_run.run_id, brief)
+        codeforge_run = sm.start_run(run_mode.value, resolved_brief)
+        _save_brief(run_log_dir, codeforge_run.run_id, resolved_brief)
         typer.echo(f"Run started: {codeforge_run.run_id}")
 
-        req_doc, code_art, test_suite = sm.execute(brief, human)
+        req_doc, code_art, test_suite = sm.execute(resolved_brief, human)
         typer.echo(f"Codeforge succeeded (run {codeforge_run.run_id})")
 
         _do_commit(sm, req_doc, code_art, test_suite, config, project_dir)
@@ -632,6 +656,71 @@ def resume(
 
     finally:
         lock.release()
+
+
+@app.command()
+def seed(
+    project_dir: Path = typer.Option(
+        ...,
+        "--project-dir",
+        "-d",
+        help="Path to the managed project directory.",
+        show_default=False,
+    ),
+    ui_design: Path = typer.Option(
+        ...,
+        "--ui-design",
+        help="Path to the .dc.html design file to seed from.",
+        show_default=False,
+    ),
+) -> None:
+    """
+    One-time bootstrap of the ui_design project state document from a .dc.html file.
+
+    Parses the design file, writes a draft ui_design.json and ui_design.md to
+    project-state/, and prints a summary. The output MUST be reviewed and edited
+    before committing — values not extractable automatically are scaffolded as
+    'TODO: fill in' placeholders.
+    """
+    from codeforge.cli.seed_parser import SeedParser
+    from codeforge.store.project_state import ProjectStateStore
+
+    if not ui_design.exists():
+        typer.echo(f"Error: file not found: {ui_design}", err=True)
+        raise typer.Exit(1)
+
+    if not project_dir.exists():
+        typer.echo(f"Error: project directory not found: {project_dir}", err=True)
+        raise typer.Exit(1)
+
+    state_dir = project_dir / "project-state"
+    existing = state_dir / "ui_design.json"
+    if existing.exists():
+        typer.echo(
+            "Error: ui_design already seeded. "
+            f"Edit {existing} directly to make changes.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        ui_state = SeedParser(ui_design).parse()
+    except ValueError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1)
+
+    store = ProjectStateStore(project_dir)
+    store.write("ui_design", ui_state.model_dump())
+
+    typer.echo(f"Seeded ui_design from: {ui_design.name}")
+    typer.echo(f"  Design tokens extracted: {len(ui_state.design_tokens)}")
+    typer.echo(f"  Phase colors extracted:  {len(ui_state.phase_colors)}")
+    typer.echo(f"  Components scaffolded:   {len(ui_state.components)}")
+    typer.echo(f"  Font family:             {ui_state.font_family}")
+    typer.echo("")
+    typer.echo("⚠  REVIEW REQUIRED before committing.")
+    typer.echo(f"   Edit {existing} — search for 'TODO: fill in' placeholders.")
+    typer.echo(f"   Rendered markdown: {state_dir / 'ui_design.md'}")
 
 
 @app.command("list-runs")

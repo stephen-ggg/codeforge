@@ -50,6 +50,7 @@ class RequirementsAnalystAgent(BaseAgent):
                 "assumptions_log_md": state.get("assumptions_log"),
                 "requirements_summary": None,
             },
+            "ui_design_md": state.get("ui_design"),
         }
 
         if reprompt is not None:

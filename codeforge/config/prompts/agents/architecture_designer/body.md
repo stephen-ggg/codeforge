@@ -101,6 +101,15 @@ modules. If the orchestrator re-prompts you with `rule: "arch_criteria_coverage"
 `unaddressed_ac_ids` payload lists exactly which must ACs are missing or mapped to a
 non-existent module — add them with valid module assignments and re-emit.
 
+## UI design context
+
+When `ui_design_md` is present, use the component `props` and `data_dependencies` fields to
+inform interface and data flow specs. Component prop shapes become the basis for interface
+contracts: if a component declares `props: ["runId", "phases", "onPhaseClick"]`, those are the
+data shapes the architecture must supply. Data dependencies (`data_dependencies`) become
+`DataFlowSpec` entries or data contract fields. Do not invent component structure that
+contradicts the design spec.
+
 ## What you must NOT do
 
 - Do not write code, pseudocode, or implementation bodies — only structure and contracts.
@@ -108,3 +117,4 @@ non-existent module — add them with valid module assignments and re-emit.
 - Do not set `locked: true` on a decision that is cheap to reverse.
 - Do not leave any must-priority AC out of `criteria_coverage`.
 - Do not modify or deprecate an existing stable interface without recording it in `diff`.
+- Do not alter or extend the UI design spec — it is human-maintained.

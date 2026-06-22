@@ -30,6 +30,7 @@ from codeforge.schemas.contracts import (
     RequirementsSummary,
     TechStackState,
     TestCoverageMap,
+    UIDesignState,
     TechDecision,
     Assumption,
 )
@@ -39,6 +40,7 @@ from codeforge.store.renderers.feature_registry import render_feature_registry
 from codeforge.store.renderers.decisions_log import render_decisions_log
 from codeforge.store.renderers.assumptions_log import render_assumptions_log
 from codeforge.store.renderers.test_coverage_map import render_test_coverage_map
+from codeforge.store.renderers.ui_design import render_ui_design
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +53,7 @@ _DOC_FILENAME: dict[str, str] = {
     "decisions_log": "decisions_log",
     "assumptions_log": "assumptions_log",
     "test_coverage_map": "test_coverage_map",
+    "ui_design": "ui_design",
     # requirements_history is handled separately (one file per run_id)
 }
 
@@ -152,6 +155,13 @@ class ProjectStateStore:
         if not path.exists():
             return None
         return dict(json.loads(path.read_text(encoding="utf-8")))
+
+    def load_ui_design(self) -> UIDesignState | None:
+        """Return the UIDesignState from disk, or None if not yet seeded."""
+        data = self.read("ui_design")
+        if data is None:
+            return None
+        return UIDesignState(**data)
 
     def list_requirements_history_run_ids(self) -> list[str]:
         """Return all run_ids that have a requirements history entry, sorted ascending."""
@@ -321,4 +331,6 @@ class ProjectStateStore:
             return render_assumptions_log(AssumptionsLog(**data))
         if document == "test_coverage_map":
             return render_test_coverage_map(TestCoverageMap(**data))
+        if document == "ui_design":
+            return render_ui_design(UIDesignState(**data))
         raise ValueError(f"No renderer for document type: {document!r}")

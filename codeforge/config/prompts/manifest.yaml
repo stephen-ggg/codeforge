@@ -38,6 +38,7 @@ agents:
       - { tag: clarification_history,kind: injected,  optional: true,  desc: "All prior question/answer rounds. Absent on first invocation." }
       - { tag: confirm_rejection,    kind: injected,  optional: true,  desc: "Present only if the human rejected a completed doc; has rejected_doc_ref + rejection_feedback." }
       - { tag: project_state,        kind: injected,  optional: true,  desc: "Continuation-mode context: architecture, tech_stack, feature_registry, decisions_log, assumptions_log renders + a typed requirements_summary. Absent in new_project mode." }
+      - { tag: ui_design,            kind: state_doc, optional: true,  desc: "Global UI design spec: design tokens, phase colors, component specs and build status. Present only when seeded." }
       - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
 
   architecture_designer:
@@ -53,6 +54,7 @@ agents:
       - { tag: tech_stack,           kind: state_doc, optional: true,  desc: "Existing locked tech decisions. Absent if none exist yet." }
       - { tag: feature_registry,     kind: state_doc, optional: true,  desc: "Existing features and their stable interfaces." }
       - { tag: spec_gap_context,     kind: injected,  optional: true,  desc: "Present only on spec-gap re-entry; has criterion_id, gap_description, affected_interfaces, affected_data_contracts." }
+      - { tag: ui_design,            kind: state_doc, optional: true,  desc: "Global UI design spec: design tokens, phase colors, component specs and build status. Present only when seeded." }
       - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
 
   coder:
@@ -68,6 +70,7 @@ agents:
       - { tag: existing_interfaces,  kind: injected,  optional: true,  desc: "Stable interfaces from prior runs your code must not break." }
       - { tag: retry_context,        kind: injected,  optional: true,  desc: "Present on retry; has trigger and the findings to fix. Mutually exclusive with code_fix_context." }
       - { tag: code_fix_context,     kind: injected,  optional: true,  desc: "Present on code-bug re-entry from the test phase; has flagged_criterion_ids only. Mutually exclusive with retry_context." }
+      - { tag: ui_design,            kind: state_doc, optional: true,  desc: "Global UI design spec: design tokens, phase colors, component specs and build status. Present only when seeded." }
       - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
 
   code_reviewer:
@@ -81,6 +84,7 @@ agents:
       - { tag: architecture_doc,     kind: artifact,  optional: false, desc: "The architecture the code should implement." }
       - { tag: code_artifact,        kind: artifact,  optional: false, desc: "The generated code with all files." }
       - { tag: decisions_log,        kind: state_doc, optional: true,  desc: "Prior decisions made during this project." }
+      - { tag: ui_design,            kind: state_doc, optional: true,  desc: "Global UI design spec: design tokens, phase colors, component specs and build status. Present only when seeded." }
       - { tag: reprompt,             kind: injected,  optional: true,  desc: "Present only when the orchestrator is re-prompting you after a validation failure." }
 
   security_reviewer:

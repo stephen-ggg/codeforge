@@ -44,6 +44,7 @@ class CodeReviewerAgent(BaseAgent):
             "code_artifact": artifacts["code_artifact"].model_dump()
             if "code_artifact" in artifacts else None,
             "decisions_log_md": state.get("decisions_log", ""),
+            "ui_design_md": state.get("ui_design"),
         }
 
         if reprompt is not None:

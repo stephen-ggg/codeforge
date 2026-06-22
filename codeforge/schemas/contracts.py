@@ -80,6 +80,7 @@ ProjectStateDocument = Literal[
     "assumptions_log",
     "tech_stack",
     "test_coverage_map",
+    "ui_design",
 ]
 
 StateWriteTarget = Literal[
@@ -90,6 +91,7 @@ StateWriteTarget = Literal[
     "assumptions_log",
     "tech_stack",
     "test_coverage_map",
+    "ui_design",
     "codeforge_repo",
     "source_repo",
 ]
@@ -399,6 +401,7 @@ class RequirementsDoc(BaseModel):
     data_contracts: list[DataContract]
     changes_from_prior: dict[str, Any] | None = None
     human_confirmed_decisions: list[str]
+    ui_design_component_ids: list[str] | None = None
 
 
 class TechDecision(BaseModel):
@@ -463,6 +466,7 @@ class RequirementsAnalystInput(BaseModel):
     project_state: dict[str, Any] | None = None  # typed fields per spec 2.1
     clarification_history: list[ClarificationExchange] = Field(default_factory=list)
     confirm_rejection: dict[str, str] | None = None  # {rejected_doc_ref, rejection_feedback}
+    ui_design_md: str | None = None
 
 
 class RequirementsNeedsClarification(BaseModel):
@@ -535,6 +539,7 @@ class ArchitectureDesignerInput(BaseModel):
     tech_stack_md: str | None = None
     feature_registry_md: str | None = None
     spec_gap_context: SpecGapDescription | None = None
+    ui_design_md: str | None = None
 
 
 ArchitectureDesignerOutput = AgentOutput[ArchitectureDoc]
@@ -674,6 +679,7 @@ class CoderInput(BaseModel):
     existing_interfaces: list[InterfaceSpec] = Field(default_factory=list)
     retry_context: CoderRetryContext | None = None
     code_fix_context: CodeFixContext | None = None
+    ui_design_md: str | None = None
 
     @model_validator(mode="after")
     def retry_and_fix_mutually_exclusive(self) -> "CoderInput":
@@ -709,6 +715,7 @@ class CodeReviewerInput(BaseModel):
     architecture_doc: ArchitectureDoc
     decisions_log_md: str
     code_artifact: CodeArtifact
+    ui_design_md: str | None = None
 
 
 CodeReviewerOutput = AgentOutput[ReviewReport]
@@ -1027,6 +1034,38 @@ class CoverageEntry(BaseModel):
 class TestCoverageMap(BaseModel):
     schema_version: str
     entries: list[CoverageEntry]
+
+
+class DesignToken(BaseModel):
+    name: str
+    value: str
+    usage: str
+
+
+class PhaseColor(BaseModel):
+    phase_id: str
+    color: str
+
+
+class ComponentSpec(BaseModel):
+    id: str
+    status: Literal["not_started", "in_progress", "built"]
+    description: str
+    props: list[str]
+    data_dependencies: list[str]
+    interactions: list[str]
+    notes: str
+
+
+class UIDesignState(BaseModel):
+    schema_version: str
+    design_source: str
+    seeded_at: str
+    last_updated_run: str
+    design_tokens: list[DesignToken]
+    phase_colors: list[PhaseColor]
+    font_family: str
+    components: list[ComponentSpec]
 
 
 # ===========================================================================
