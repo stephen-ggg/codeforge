@@ -61,66 +61,75 @@ class SeedParser:
         return m.group(1) if m else ""
 
     def _extract_style(self) -> str:
-        m = re.search(r'<style[^>]*>(.*?)</style>', self._html, re.DOTALL)
-        return m.group(1) if m else ""
+        # Collect ALL <style> blocks — a .dc.html may have vendor resets before
+        # the main design stylesheet.
+        blocks = re.findall(r'<style[^>]*>(.*?)</style>', self._html, re.DOTALL)
+        return "\n".join(blocks)
+
+    @staticmethod
+    def _balanced_block(text: str, start: int) -> str | None:
+        """
+        Return content within balanced braces starting just after the opening `{`
+        at `start`. Returns None when braces are unbalanced (malformed/truncated input).
+        """
+        depth = 1
+        i = start
+        while i < len(text) and depth > 0:
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+            i += 1
+        if depth != 0:
+            return None
+        return text[start:i - 1]
 
     def _extract_phase_colors(self, script: str) -> list[PhaseColor]:
         """Extract phase colors from PH = { key: { name: '...', color: '...' }, ... }."""
-        # Locate the PH assignment block by finding PH = { and then collecting
-        # up to the matching closing } using brace depth tracking.
         m = re.search(r'PH\s*=\s*\{', script)
         if not m:
             return []
 
-        start = m.end()
-        depth = 1
-        i = start
-        while i < len(script) and depth > 0:
-            if script[i] == '{':
-                depth += 1
-            elif script[i] == '}':
-                depth -= 1
-            i += 1
-        block = script[start:i - 1]
+        ph_block = self._balanced_block(script, m.end())
+        if ph_block is None:
+            return []  # malformed PH object — skip
 
         results: list[PhaseColor] = []
-        for entry in re.finditer(
-            r"(\w+)\s*:\s*\{[^}]*color\s*:\s*['\"]([^'\"]+)['\"]",
-            block,
-        ):
-            results.append(PhaseColor(phase_id=entry.group(1), color=entry.group(2)))
+        for entry_m in re.finditer(r'(\w+)\s*:\s*\{', ph_block):
+            key = entry_m.group(1)
+            entry_block = self._balanced_block(ph_block, entry_m.end())
+            if entry_block is None:
+                continue
+            color_m = re.search(r"color\s*:\s*['\"]([^'\"]+)['\"]", entry_block)
+            if color_m:
+                results.append(PhaseColor(phase_id=key, color=color_m.group(1)))
 
         return results
 
     def _extract_design_tokens(self, style: str, script: str) -> list[DesignToken]:
         tokens: list[DesignToken] = []
 
+        # Strip CSS block comments before matching — /* ... */ comments would
+        # otherwise match the custom-property regex and inject phantom tokens.
+        style_clean = re.sub(r'/\*.*?\*/', '', style, flags=re.DOTALL)
+
         # CSS custom properties: --name: value
-        for m in re.finditer(r'--([a-zA-Z0-9_-]+)\s*:\s*([^;}\n]+)', style):
+        for m in re.finditer(r'--([a-zA-Z0-9_-]+)\s*:\s*([^;}\n]+)', style_clean):
             tokens.append(DesignToken(
                 name=m.group(1).strip(),
                 value=m.group(2).strip(),
                 usage=_PLACEHOLDER,
             ))
 
-        # Named constants in script: ERR = '...' and ORCH = '...'
+        # Named color constants in script: ERR = '...' and ORCH = '...'
         for const in ("ERR", "ORCH"):
-            m = re.search(rf"{const}\s*=\s*['\"]([^'\"]+)['\"]", script)
-            if m:
+            cm = re.search(rf"\b{const}\b\s*=\s*['\"]([^'\"]+)['\"]", script)
+            if cm:
                 tokens.append(DesignToken(
                     name=const.lower(),
-                    value=m.group(1),
+                    value=cm.group(1),
                     usage=_PLACEHOLDER,
                 ))
-
-        # Body background from inline style
-        m = re.search(r'background\s*:\s*(#[0-9a-fA-F]+)', style)
-        if m:
-            tokens.append(DesignToken(
-                name="bg_base",
-                value=m.group(1),
-                usage="Page background",
-            ))
 
         return tokens
 

@@ -1389,11 +1389,15 @@ class StateMachine:
 
     def _stage_ui_design_update(self) -> None:
         """If this run built UI components, mark them as built in the ui_design document."""
+        if self._run is None:
+            return
+
         # Read ui_design_component_ids from the staged requirements_history entry.
         req_history = self.pending.get("requirements_history")
         if not req_history:
             return
         component_ids: list[str] | None = req_history.get("ui_design_component_ids")
+        # None means the field was absent; [] means no components — both skip.
         if not component_ids:
             return
 
@@ -1412,7 +1416,7 @@ class StateMachine:
         for comp in ui_state.components:
             if comp.id in id_set:
                 comp.status = "built"
-        ui_state.last_updated_run = self.run.run_id
+        ui_state.last_updated_run = self._run.run_id
         self.pending.set("ui_design", ui_state.model_dump())
 
     def run_commit(self) -> None:

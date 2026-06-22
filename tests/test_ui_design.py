@@ -575,3 +575,120 @@ def test_run_brief_file_empty(tmp_path: Path) -> None:
     ])
     assert result.exit_code != 0
     assert "empty" in result.output
+
+
+def test_run_brief_empty_string_rejected(tmp_path: Path) -> None:
+    result = runner.invoke(app, [
+        "run",
+        "--project-dir", str(tmp_path),
+        "--brief", "",
+    ])
+    assert result.exit_code != 0
+    assert "empty" in result.output
+
+
+def test_run_brief_whitespace_only_rejected(tmp_path: Path) -> None:
+    result = runner.invoke(app, [
+        "run",
+        "--project-dir", str(tmp_path),
+        "--brief", "   ",
+    ])
+    assert result.exit_code != 0
+    assert "empty" in result.output
+
+
+# ---------------------------------------------------------------------------
+# SeedParser edge-case fixes
+# ---------------------------------------------------------------------------
+
+_DC_HTML_MULTIPLE_STYLES = dedent("""
+<!DOCTYPE html>
+<html>
+<head>
+<style>/* vendor reset */ body{margin:0}</style>
+<style>
+  --primary: #aabbcc;
+  body{font-family:'Inter',sans-serif;}
+</style>
+</head>
+<body>
+<x-dc>
+<script type="text/x-dc" data-dc-script data-props="{}">
+class C extends DCLogic {}
+</script>
+</x-dc>
+</body>
+</html>
+""").strip()
+
+
+def test_seed_parser_extracts_tokens_from_second_style_block(tmp_path: Path) -> None:
+    """Design tokens in the second <style> block must not be silently dropped."""
+    html_file = tmp_path / "dashboard.dc.html"
+    html_file.write_text(_DC_HTML_MULTIPLE_STYLES)
+    state = SeedParser(html_file).parse()
+    token_names = {t.name for t in state.design_tokens}
+    assert "primary" in token_names, "Token from second style block must be captured"
+
+
+def test_seed_parser_ignores_tokens_in_css_comments(tmp_path: Path) -> None:
+    """A CSS custom property inside /* ... */ must not appear as a real token."""
+    html = dedent("""
+    <x-dc>
+    <style>
+    /* --deprecated-color: #f00; */
+    --real-color: #00ff00;
+    </style>
+    <script type="text/x-dc" data-dc-script data-props="{}">
+    class C extends DCLogic {}
+    </script>
+    </x-dc>
+    """).strip()
+    html_file = tmp_path / "dashboard.dc.html"
+    html_file.write_text(html)
+    state = SeedParser(html_file).parse()
+    token_names = {t.name for t in state.design_tokens}
+    assert "real-color" in token_names
+    assert "deprecated-color" not in token_names, "Commented-out token must be ignored"
+
+
+def test_seed_parser_phase_colors_with_nested_entry(tmp_path: Path) -> None:
+    """Phase entry with a sub-object before color must still yield a PhaseColor."""
+    html = dedent("""
+    <x-dc>
+    <style></style>
+    <script type="text/x-dc" data-dc-script data-props="{}">
+    class C extends DCLogic {
+      PH = {
+        req: { meta: { id: 1 }, name: 'Requirements', color: 'oklch(0.70 0.14 255)' },
+      };
+    }
+    </script>
+    </x-dc>
+    """).strip()
+    html_file = tmp_path / "dashboard.dc.html"
+    html_file.write_text(html)
+    state = SeedParser(html_file).parse()
+    assert len(state.phase_colors) == 1
+    assert state.phase_colors[0].phase_id == "req"
+    assert state.phase_colors[0].color == "oklch(0.70 0.14 255)"
+
+
+def test_cli_seed_errors_already_seeded_uses_atomic_check(tmp_path: Path) -> None:
+    """Second seed invocation must fail even if the file exists but is empty (touch race)."""
+    html_file = tmp_path / "dashboard.dc.html"
+    html_file.write_text(_MINIMAL_DC_HTML)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    state_dir = project_dir / "project-state"
+    state_dir.mkdir(parents=True)
+    # Simulate the atomic placeholder left by a concurrent invocation
+    (state_dir / "ui_design.json").touch()
+
+    result = runner.invoke(app, [
+        "seed",
+        "--project-dir", str(project_dir),
+        "--ui-design", str(html_file),
+    ])
+    assert result.exit_code != 0
+    assert "already seeded" in result.output

@@ -426,7 +426,10 @@ def run(
             typer.echo(f"Error: brief file is empty: {brief_file}", err=True)
             raise typer.Exit(1)
     else:
-        resolved_brief = brief  # type: ignore[assignment]
+        resolved_brief = brief.strip()  # type: ignore[assignment]
+        if not resolved_brief:
+            typer.echo("Error: --brief value is empty.", err=True)
+            raise typer.Exit(1)
 
     config = _load_config_or_exit(project_dir)
     lock = CodeforgeLock(project_dir)
@@ -694,8 +697,14 @@ def seed(
         raise typer.Exit(1)
 
     state_dir = project_dir / "project-state"
+    state_dir.mkdir(parents=True, exist_ok=True)
     existing = state_dir / "ui_design.json"
-    if existing.exists():
+
+    # Atomically claim the output file with exclusive-create mode so concurrent
+    # invocations cannot both pass the "already seeded" guard.
+    try:
+        existing.touch(exist_ok=False)
+    except FileExistsError:
         typer.echo(
             "Error: ui_design already seeded. "
             f"Edit {existing} directly to make changes.",
@@ -706,6 +715,7 @@ def seed(
     try:
         ui_state = SeedParser(ui_design).parse()
     except ValueError as exc:
+        existing.unlink(missing_ok=True)  # release the placeholder on parse failure
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1)
 
