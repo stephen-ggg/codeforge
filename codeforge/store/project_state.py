@@ -96,18 +96,21 @@ class ProjectStateStore:
 
     def read_as_markdown(self, document: ProjectStateDocument) -> str | None:
         """
-        Read a project state document's rendered markdown.
+        Render a project state document to markdown from its JSON source.
         Returns None if the document does not exist yet.
+
+        Always renders from JSON so that manual edits to the .json are
+        immediately visible to agents — the .md file on disk is a human-
+        readable convenience artifact, not the authoritative source.
         """
         if document == "requirements_history":
             raise ValueError(
                 "requirements_history has no markdown render — use read_requirements_history()."
             )
-        filename = _DOC_FILENAME[document]
-        md_path = self._state_dir / f"{filename}.md"
-        if not md_path.exists():
+        data = self.read(document)
+        if data is None:
             return None
-        return md_path.read_text(encoding="utf-8")
+        return self._render(document, data)
 
     # ------------------------------------------------------------------
     # Write
