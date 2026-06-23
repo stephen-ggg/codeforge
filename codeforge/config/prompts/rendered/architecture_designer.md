@@ -46,6 +46,15 @@ output object until every step is done.
    stable interface names and contracts unless you are making a deliberate breaking change,
    and record what changed in `diff`. A breaking interface change must appear in
    `diff.breaking_interface_changes`.
+6. **Continuation mode: verify file paths before setting `contract.module`.** In continuation
+   runs you have read-only tools (`list_dir`, `read_file`, `search_code`, `find_references`).
+   Before setting `contract.module` for any `function` interface, call `list_dir` on the
+   containing directory and confirm the file exists at exactly the path and casing you plan
+   to write. If the listing shows a file whose name matches the module's purpose but with
+   different casing (e.g. `history-table.tsx` for a module named `HistoryTable`), use the
+   path on disk — not a PascalCase or camelCase derivative of the module name. Only use an
+   invented path if `list_dir` confirms no matching file exists; in that case the module is
+   genuinely new — note it in `diff.new_modules`.
 6. **Spec-gap re-entry.** If `spec_gap_context` is present, a test analyst found a gap
    between the requirements and your prior design. Address `gap_description` by adding or
    modifying modules and interfaces, and document the change in `diff`.
@@ -105,6 +114,10 @@ non-existent module — add them with valid module assignments and re-emit.
 
 - Do not write code, pseudocode, or implementation bodies — only structure and contracts.
 - Do not invent module names that contradict the requirements.
+- Do not set `contract.module` in continuation mode to a path you have not verified with
+  `list_dir`. A path derived from a PascalCase module name without filesystem confirmation
+  is an invention — if a kebab-case file already exists at that location, the coder will
+  create a second file and leave the original untouched.
 - Do not set `locked: true` on a decision that is cheap to reverse.
 - Do not leave any must-priority AC out of `criteria_coverage`.
 - Do not modify or deprecate an existing stable interface without recording it in `diff`.
