@@ -36,6 +36,7 @@ from codeforge.orchestrator.routing import (
     RoutingOutcome,
     apply_outcome,
     route_malformed,
+    route_truncated,
     route_block_flag,
     route_ceiling_exceeded,
     route_low_confidence,
@@ -170,6 +171,12 @@ class StateMachine:
         # Tracks which phase is currently executing so escalation events can carry
         # a suggested reentry state for the human operator.
         self._current_phase: "ReentryState | None" = None
+
+        # Whether the most recent _invoke_agent response was cut off at max_tokens
+        # (finish_reason=length). Consumed by _handle_structural_failure to route a
+        # truncated response through the bounded truncation path rather than treating
+        # it as a generic malformed_output failure. Set fresh on every invocation.
+        self._last_truncated: bool = False
 
     # ------------------------------------------------------------------
     # Run lifecycle
@@ -443,10 +450,12 @@ class StateMachine:
             litellm_call_id=result.litellm_call_id,
         )
 
+        self._last_truncated = result.truncated
         if result.truncated:
             logger.warning(
                 "Agent '%s' returned finish_reason=length (%d bytes); "
-                "routing through schema_valid gate for retry eligibility",
+                "routing through the bounded truncation path "
+                "(one retry for a transient hiccup, then escalate output_truncated)",
                 agent_id, len(result.content.encode()),
             )
 
@@ -612,10 +621,19 @@ class StateMachine:
         raw: str,
         agent_id: str,
         gate_result: GateResult,
+        truncated: bool | None = None,
     ) -> RePromptContext | None:
         """
         Handle a structural (malformed) or contract gate failure: route_malformed
-        decides re-prompt vs escalate.
+        (or route_truncated when the response was cut off at max_tokens) decides
+        re-prompt vs escalate.
+
+        A response that hit finish_reason=length structurally cannot parse, so it lands
+        here. It is routed through route_truncated — one bounded retry for a transient
+        hiccup, then escalate as output_truncated — instead of spending the
+        malformed_output budget on a re-prompt that regenerates the same oversized,
+        identically-truncated output. `truncated` defaults to the most recent
+        _invoke_agent result; pass it explicitly to drive the path in isolation.
 
         On the terminal (budget-exhausted) path the raw LLM response — which failed
         validation and would otherwise be dropped — is persisted to the ISOLATED
@@ -624,7 +642,12 @@ class StateMachine:
         path; raises EscalationError on the terminal path.
         """
         reprompt = gate_result.malformed_reprompt or gate_result.violation_reprompt
-        outcome = route_malformed(self.run.retry_counters, self._config.to_dict(), agent_id)
+        is_truncated = self._last_truncated if truncated is None else truncated
+        config = self._config.to_dict()
+        if is_truncated and not gate_result.structural_passed:
+            outcome = route_truncated(self.run.retry_counters, config, agent_id)
+        else:
+            outcome = route_malformed(self.run.retry_counters, config, agent_id)
         if outcome.decision == "escalate":
             artifact_id = self.artifact_store.write_raw(raw, produced_by=agent_id)
             # Emit the failing schema_valid gate here (not in GateEvaluator) so it can link
@@ -1564,7 +1587,11 @@ class StateMachine:
             # grants a full budget for what is genuinely a new coding invocation.
             if next_state == "coding":
                 self.run.retry_counters = self.run.retry_counters.model_copy(
-                    update={"malformed_output": 0, "coder_low_confidence_reprompt": 0}
+                    update={
+                        "malformed_output": 0,
+                        "truncation_retry": 0,
+                        "coder_low_confidence_reprompt": 0,
+                    }
                 )
 
             # Re-entering test_design (e.g. after a test_designer malformed_output
@@ -1574,7 +1601,11 @@ class StateMachine:
             # per-invocation cushions.
             if next_state == "test_design":
                 self.run.retry_counters = self.run.retry_counters.model_copy(
-                    update={"malformed_output": 0, "test_designer_low_confidence_reprompt": 0}
+                    update={
+                        "malformed_output": 0,
+                        "truncation_retry": 0,
+                        "test_designer_low_confidence_reprompt": 0,
+                    }
                 )
 
         while next_state != "done":

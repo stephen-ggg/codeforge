@@ -21,6 +21,7 @@ retry_limits:
   dependency_repair: 2                # auto-recovery: re-invoke coder to fix the runtime dependency manifest (or a build/type-check failure)
   low_confidence_reprompt: 1          # one-shot re-prompt before a low-confidence escalation
   malformed_output_retries: 2         # independent of all loop counters
+  truncation_retries: 1               # finish_reason=length: one retry for a transient hiccup, then escalate output_truncated
   codeforge_state_commit: 3
   source_code_commit: 3
 

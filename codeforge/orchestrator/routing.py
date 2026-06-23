@@ -113,17 +113,34 @@ def route_ceiling_exceeded() -> RoutingOutcome:
     )
 
 
-def route_output_truncated() -> RoutingOutcome:
+def route_truncated(
+    counters: RetryCounters,
+    config: dict[str, Any],
+    agent_id: str,
+) -> RoutingOutcome:
     """Response hit max_tokens (finish_reason == 'length') — truncated, unparseable.
 
-    Terminal: a re-prompt regenerates the same oversized output and truncates again at
-    the same ceiling, so escalate immediately rather than spending malformed_output
-    re-prompts. Resolution is config (raise max_tokens) or a smaller unit of work.
+    A lone finish_reason=length can be a transient API hiccup, so allow ONE re-prompt
+    to recover (its own budget, independent of malformed_output). A second, CONSECUTIVE
+    truncation is genuine: the agent's output does not fit max_tokens and a re-prompt
+    just regenerates the same oversized response and truncates again at the same ceiling.
+    Escalate that as output_truncated — NOT malformed_output — so the operator is steered
+    to the real remedy (raise max_tokens or a smaller unit of work) instead of resetting
+    a counter and re-entering into an identical failure.
     """
+    limit = _get_limit(config, "truncation_retries", 1)
+    if _within_budget(counters.truncation_retry, limit):
+        return RoutingOutcome(
+            row_id="output_truncated_retry",
+            decision="re_prompt_same_agent",
+            next_state=f"{agent_id}_reprompt",
+            counter_deltas={"truncation_retry": 1},
+        )
     return RoutingOutcome(
         row_id="output_truncated",
         decision="escalate",
         next_state="failed_escalated",
+        counter_deltas={"truncation_retry": 1},
         escalation_reason="output_truncated",
     )
 
@@ -494,7 +511,7 @@ def route_test_analysis_code_bug(
             next_state="coding",
             counter_deltas={"test_loop": 1},
             # fresh coder invocation — restore its per-invocation re-prompt cushion.
-            counter_resets=["coder_low_confidence_reprompt", "malformed_output"],
+            counter_resets=["coder_low_confidence_reprompt", "malformed_output", "truncation_retry"],
         )
     return RoutingOutcome(
         row_id="test_analysis_code_bug_exhausted",
@@ -519,7 +536,7 @@ def route_test_analysis_test_bug(
             counter_deltas={"test_loop": 1},
             # fresh test_designer invocation — restore its per-invocation re-prompt
             # cushion so a low-confidence/malformed retry isn't denied its one shot.
-            counter_resets=["test_designer_low_confidence_reprompt", "malformed_output"],
+            counter_resets=["test_designer_low_confidence_reprompt", "malformed_output", "truncation_retry"],
         )
     return RoutingOutcome(
         row_id="test_analysis_test_bug_exhausted",
@@ -554,6 +571,7 @@ def route_test_analysis_spec_gap(
                 "code_reviewer_low_confidence_reprompt",
                 "security_reviewer_low_confidence_reprompt",
                 "malformed_output",
+                "truncation_retry",
             ],
         )
     return RoutingOutcome(

@@ -256,6 +256,7 @@ class RetryCounters(BaseModel):
     test_designer_low_confidence_reprompt: int = 0
     test_analyst_low_confidence_reprompt: int = 0
     malformed_output: int = 0
+    truncation_retry: int = 0     # finish_reason=length: one retry for a transient hiccup, then escalate output_truncated
     codeforge_state_commit: int = 0
     source_code_commit: int = 0
 
@@ -1090,6 +1091,7 @@ class CountersSnapshot(BaseModel):
     test_designer_low_confidence_reprompt: int = 0
     test_analyst_low_confidence_reprompt: int = 0
     malformed_output: int = 0
+    truncation_retry: int = 0
     codeforge_state_commit: int = 0
     source_code_commit: int = 0
     agent_call_count: int = 0
