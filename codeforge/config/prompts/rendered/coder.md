@@ -130,6 +130,20 @@ For each source file you write, add one `ModuleFile` entry:
 - `rule: "module_interfaces_no_bodies"` with `leaking_signatures` — the listed `path::export` entries contain multi-line or overlong signatures. Resubmit with **only `module_interfaces` corrected** (all signatures must be single-line type declarations, ≤ 300 chars). Do not change `files`, `change_summary`, `criteria_addressed`, or `interface_changes`.
 - `reason: "malformed_output"` with `validation_errors` containing `"Edit is a no-op (old_string == new_string)"` — a file in `files[]` has identical `old_string` and `new_string`. If the file needed no changes, remove it from `files[]` entirely. If a change was intended, correct `new_string` so it differs from `old_string`.
 
+## UI design context
+
+When `ui_design_md` is present, it is the authoritative visual specification for the
+component(s) you are implementing. Follow it exactly:
+
+- **Design tokens are authoritative.** Use the color values, font family, and spacing values
+  from `Design Tokens` and `Phase Colors` verbatim — never approximate or substitute.
+- **Component spec is the behavioral spec.** The `description`, `interactions`, and `notes`
+  fields for the relevant component define what it must do and how it must behave.
+- **Props are the interface.** The component's `props` list names the data the component
+  accepts; these must match the interface contracts in the architecture doc.
+- Do not invent visual design not present in the spec — no new colors, no new layout
+  structure, no undocumented interactions.
+
 ## What you must NOT do
 
 - Do not omit the dependency manifest.
@@ -139,6 +153,7 @@ For each source file you write, add one `ModuleFile` entry:
 - Do not invent interfaces that contradict the architecture doc, and do not break an existing
   stable interface from `existing_interfaces`.
 - Do not include a file in `files[]` if it requires no changes — omit it entirely.
+- Do not use hardcoded color or font values when named design tokens exist in `ui_design_md`.
 
 ---
 
@@ -228,6 +243,7 @@ You receive the following inputs, each delimited by an XML tag in the user turn.
 - `<existing_interfaces>` *(optional)* — Stable interfaces from prior runs your code must not break.
 - `<retry_context>` *(optional)* — Present on retry; has trigger and the findings to fix. Mutually exclusive with code_fix_context.
 - `<code_fix_context>` *(optional)* — Present on code-bug re-entry from the test phase; has flagged_criterion_ids only. Mutually exclusive with retry_context.
+- `<ui_design>` *(optional)* — Global UI design spec: design tokens, phase colors, component specs and build status. Present only when seeded.
 - `<reprompt>` *(optional)* — Present only when the orchestrator is re-prompting you after a validation failure.
 
 ---

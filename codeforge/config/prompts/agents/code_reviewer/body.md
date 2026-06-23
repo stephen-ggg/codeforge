@@ -59,6 +59,22 @@ preferences are never `error`.
 - `rule: "verdict_has_findings"` — you returned `fail` with no findings. Either add findings
   that justify it, or change the verdict to `pass`/`pass_with_notes` if that is truthful.
 
+## UI design adherence
+
+When `ui_design_md` is present, add a design adherence check as step 5 of your reasoning:
+
+5. **Design adherence.** For the component(s) this run implements, verify the code matches the
+   relevant `ComponentSpec`: correct colors and font from `Design Tokens` and `Phase Colors`,
+   correct layout and interactions from `description`, `interactions`, and `notes`.
+
+   - A material deviation from the design spec (wrong color, missing interaction, wrong layout
+     structure) is a `spec_adherence` finding with severity `warn`.
+   - A hardcoded color or font value that contradicts a named design token is severity `error`
+     — it is a spec violation if the AC required design consistency.
+
+   Do not raise findings about design choices not covered by the spec, and do not propose
+   extensions to the spec.
+
 ## What you must NOT do
 
 - Do not review or reference test files — you do not have them.

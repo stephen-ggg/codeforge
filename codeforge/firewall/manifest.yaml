@@ -145,6 +145,13 @@ project_state_access:
       - test_designer
       - test_analyst
 
+  ui_design:
+    allowed_readers:
+      - requirements_analyst
+      - architecture_designer
+      - coder
+      - code_reviewer
+
 # Read-only codebase tool access (continuation runs only).
 # Agents listed here may be handed search_code / read_file / find_references /
 # list_dir tools over the existing source repo. Every other agent — crucially

@@ -638,41 +638,60 @@ class ModelRouter:
 
     @staticmethod
     def _extract_json(text: str) -> str:
-        """Strip markdown fences / leading prose and return the final top-level JSON
-        object substring. With native thinking this is a no-op (text is already pure
-        JSON); it exists for the scratchpad fallback path and stray-fence robustness."""
+        """Strip markdown fences / leading prose and return the last top-level JSON
+        object in the text.
+
+        Scans backwards from the last '}', which makes this immune to '{' and '}'
+        in leading prose (regex patterns, CSS selectors, markdown code spans). The
+        prose braces are never reached because the scan stops as soon as brace depth
+        hits zero — at the JSON object's opening '{'.
+        """
         s = text.strip()
         if s.startswith("```"):
             s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
             s = re.sub(r"\n?```$", "", s).strip()
+        # Fast path: already pure JSON.
         if s.startswith("{") and s.endswith("}"):
             return s
-        # Walk character-by-character, skipping string literals so that braces
-        # inside JSON string values (e.g. embedded source code) don't corrupt
-        # the depth counter.
-        depth, start, last = 0, None, None
-        i = 0
-        n = len(s)
-        while i < n:
+
+        # Find the last `}` — the anchor for the backward scan.
+        end = len(s) - 1
+        while end >= 0 and s[end] != "}":
+            end -= 1
+        if end < 0:
+            return s  # no closing brace; gate will reject as malformed
+
+        depth = 0
+        i = end
+        while i >= 0:
             ch = s[i]
-            if ch == '"' and depth > 0:
-                # Skip over a JSON string literal, honouring backslash escapes.
-                i += 1
-                while i < n:
-                    c = s[i]
-                    if c == "\\":
-                        i += 2  # skip escaped character
-                        continue
-                    if c == '"':
-                        break
-                    i += 1
-            elif ch == "{":
-                if depth == 0:
-                    start = i
-                depth += 1
+            if ch == '"':
+                # Count consecutive backslashes immediately before this `"` to
+                # determine whether it is escaped. Odd count → escaped (not a
+                # string delimiter); even count (incl. zero) → real delimiter.
+                k, j = 0, i - 1
+                while j >= 0 and s[j] == "\\":
+                    k += 1
+                    j -= 1
+                if k % 2 == 0:
+                    # Unescaped `"` — scan further backwards to skip the string literal.
+                    i -= 1
+                    while i >= 0:
+                        c2 = s[i]
+                        if c2 == '"':
+                            k2, j2 = 0, i - 1
+                            while j2 >= 0 and s[j2] == "\\":
+                                k2 += 1
+                                j2 -= 1
+                            if k2 % 2 == 0:
+                                break  # found the opening `"` of this string literal
+                        i -= 1
             elif ch == "}":
+                depth += 1
+            elif ch == "{":
                 depth -= 1
-                if depth == 0 and start is not None:
-                    last = s[start:i + 1]
-            i += 1
-        return last if last is not None else s
+                if depth == 0:
+                    return s[i:end + 1]
+            i -= 1
+
+        return s  # fallback — gate will reject as malformed

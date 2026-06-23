@@ -84,6 +84,18 @@ human's reply faster and less ambiguous.
 
 - AC ids are stable strings (`AC-001`, `AC-002`, …).
 
+## UI design context
+
+When `ui_design_md` is present, use the component `status` fields to understand what is
+already built (`built`) and what is not (`not_started`, `in_progress`). When scoping a new
+brief, identify which component(s) from the design are relevant to the request and name them
+explicitly in `scope.in_scope`. Set `ui_design_component_ids` to the list of `ComponentSpec.id`
+values this run implements — for example `["PhaseRail", "Header"]`. Set it to `null` when the
+brief does not map to any named component (e.g. an API route or utility function).
+
+Do not redesign or extend the design spec. The spec is a human-maintained artifact; your role
+is to use it, not to author it.
+
 ## Continuation mode
 
 When `project_state` is present, build on what exists. Do not re-propose implemented and

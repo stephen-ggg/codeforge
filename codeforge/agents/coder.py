@@ -58,6 +58,7 @@ class CoderAgent(BaseAgent):
             "retry_context": json.loads(state.get("_retry_context", "null")),
             "code_fix_context": json.loads(state.get("_code_fix_context", "null")),
             "dep_fix_context": json.loads(state.get("_dep_fix_context", "null")),
+            "ui_design_md": state.get("ui_design"),
         }
 
         if reprompt is not None:

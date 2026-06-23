@@ -1387,9 +1387,42 @@ class StateMachine:
     # Commit (flush + CommitWriter)
     # ------------------------------------------------------------------
 
+    def _stage_ui_design_update(self) -> None:
+        """If this run built UI components, mark them as built in the ui_design document."""
+        if self._run is None:
+            return
+
+        # Read ui_design_component_ids from the staged requirements_history entry.
+        req_history = self.pending.get("requirements_history")
+        if not req_history:
+            return
+        component_ids: list[str] | None = req_history.get("ui_design_component_ids")
+        # None means the field was absent; [] means no components — both skip.
+        if not component_ids:
+            return
+
+        # Load UIDesignState — pending first, then disk.
+        from codeforge.schemas.contracts import UIDesignState
+        pending_ui = self.pending.get("ui_design")
+        if pending_ui is not None:
+            ui_state = UIDesignState(**pending_ui)
+        else:
+            ui_state = self._project_state.load_ui_design()
+        if ui_state is None:
+            return  # not seeded; nothing to update
+
+        # Update matching component statuses.
+        id_set = set(component_ids)
+        for comp in ui_state.components:
+            if comp.id in id_set:
+                comp.status = "built"
+        ui_state.last_updated_run = self._run.run_id
+        self.pending.set("ui_design", ui_state.model_dump())
+
     def run_commit(self) -> None:
         """Flush pending_writes to disk. CommitWriter invocation handled by CLI layer."""
         self._current_phase = "commit"
+        self._stage_ui_design_update()
         counters = self._counters_snap()
         flush_pending_writes(
             self.pending,

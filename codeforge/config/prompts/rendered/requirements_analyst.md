@@ -84,6 +84,18 @@ human's reply faster and less ambiguous.
 
 - AC ids are stable strings (`AC-001`, `AC-002`, …).
 
+## UI design context
+
+When `ui_design_md` is present, use the component `status` fields to understand what is
+already built (`built`) and what is not (`not_started`, `in_progress`). When scoping a new
+brief, identify which component(s) from the design are relevant to the request and name them
+explicitly in `scope.in_scope`. Set `ui_design_component_ids` to the list of `ComponentSpec.id`
+values this run implements — for example `["PhaseRail", "Header"]`. Set it to `null` when the
+brief does not map to any named component (e.g. an API route or utility function).
+
+Do not redesign or extend the design spec. The spec is a human-maintained artifact; your role
+is to use it, not to author it.
+
 ## Continuation mode
 
 When `project_state` is present, build on what exists. Do not re-propose implemented and
@@ -204,6 +216,7 @@ You receive the following inputs, each delimited by an XML tag in the user turn.
 - `<clarification_history>` *(optional)* — All prior question/answer rounds. Absent on first invocation.
 - `<confirm_rejection>` *(optional)* — Present only if the human rejected a completed doc; has rejected_doc_ref + rejection_feedback.
 - `<project_state>` *(optional)* — Continuation-mode context: architecture, tech_stack, feature_registry, decisions_log, assumptions_log renders + a typed requirements_summary. Absent in new_project mode.
+- `<ui_design>` *(optional)* — Global UI design spec: design tokens, phase colors, component specs and build status. Present only when seeded.
 - `<reprompt>` *(optional)* — Present only when the orchestrator is re-prompting you after a validation failure.
 
 ---
@@ -260,6 +273,7 @@ Your response payload must be a single JSON object matching the schema below. Pr
 | `output.requirements_doc.data_contracts[].relationships` | `string[]` | required |
 | `output.requirements_doc.changes_from_prior` | `object | null` | optional |
 | `output.requirements_doc.human_confirmed_decisions` | `string[]` | required |
+| `output.requirements_doc.ui_design_component_ids` | `string[] | null` | optional |
 | `assumptions_made` | `Assumption[]` | required |
 | `assumptions_made[].id` | `string` | required |
 | `assumptions_made[].description` | `string` | required |

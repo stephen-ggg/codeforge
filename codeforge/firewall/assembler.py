@@ -116,6 +116,7 @@ _ALL_STATE_DOCUMENTS: list[ProjectStateDocument] = [
     "decisions_log",
     "assumptions_log",
     "test_coverage_map",
+    "ui_design",
 ]
 
 
