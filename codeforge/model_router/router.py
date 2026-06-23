@@ -87,6 +87,15 @@ _SCRATCHPAD_INSTRUCTION = (
 _MAX_ATTEMPTS: int = 5
 _BACKOFF_BASE: float = 2.0
 
+# The four top-level keys every agent's output envelope carries (mirrors
+# schemas.contracts.AgentOutput). Used only to disambiguate which parsed object is
+# the envelope when a response contains more than one JSON object — e.g. the model
+# quoted a JSON snippet in its reasoning, or appended a trailing example. This is a
+# selection hint, NOT schema validation (that remains the orchestrator's job).
+_ENVELOPE_KEYS: frozenset[str] = frozenset(
+    {"output", "assumptions_made", "confidence", "unresolved_flags"}
+)
+
 # Transient errors safe to retry on the same model. Everything else
 # (AuthenticationError, BadRequestError, PermissionDeniedError, etc.)
 # propagates immediately so complete() can fall through to the fallback model.
@@ -638,60 +647,56 @@ class ModelRouter:
 
     @staticmethod
     def _extract_json(text: str) -> str:
-        """Strip markdown fences / leading prose and return the last top-level JSON
-        object in the text.
+        """Return the JSON envelope object embedded in a model response.
 
-        Scans backwards from the last '}', which makes this immune to '{' and '}'
-        in leading prose (regex patterns, CSS selectors, markdown code spans). The
-        prose braces are never reached because the scan stops as soon as brace depth
-        hits zero — at the JSON object's opening '{'.
+        The response contract is: free-text reasoning first, then a single JSON
+        object as the final content, with nothing after it. We honour that with a
+        forward scan backed by the real JSON lexer rather than hand-rolled brace
+        counting:
+
+          1. Strip an optional ``` / ```json markdown fence.
+          2. From each `{` in turn, ask json.JSONDecoder.raw_decode to parse exactly
+             one value. raw_decode uses the real lexer — correct string, escape, and
+             brace handling — and ignores any text trailing the value it parses. So
+             leading prose, braces *inside* that prose, embedded code containing
+             `{ } " \\"`, and any trailing snippet or postscript all fall away for
+             free, with none of the desync failure modes of a hand-rolled scanner.
+          3. Prefer the last parsed object carrying the envelope keys (disambiguates
+             a JSON snippet quoted in the reasoning from the real envelope, and a
+             re-emitted draft from its final version); else fall back to the last
+             object that parses at all, since the contract puts the output last.
+
+        Returns the stripped text unchanged when nothing parses, so the schema_valid
+        gate rejects it as malformed with a useful error.
         """
         s = text.strip()
         if s.startswith("```"):
             s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
             s = re.sub(r"\n?```$", "", s).strip()
-        # Fast path: already pure JSON.
-        if s.startswith("{") and s.endswith("}"):
-            return s
 
-        # Find the last `}` — the anchor for the backward scan.
-        end = len(s) - 1
-        while end >= 0 and s[end] != "}":
-            end -= 1
-        if end < 0:
-            return s  # no closing brace; gate will reject as malformed
+        decoder = json.JSONDecoder()
+        envelope_match: str | None = None
+        last_object: str | None = None
+        start = s.find("{")
+        while start != -1:
+            try:
+                obj, end = decoder.raw_decode(s, start)
+            except json.JSONDecodeError:
+                # Not the start of a valid object (a brace in prose, a regex, an
+                # unterminated fragment) — try the next `{`.
+                start = s.find("{", start + 1)
+                continue
+            if isinstance(obj, dict):
+                segment = s[start:end]
+                last_object = segment
+                if _ENVELOPE_KEYS.issubset(obj.keys()):
+                    envelope_match = segment
+            # Resume past the object we just consumed, so only top-level objects
+            # are considered (never the nested objects inside one we already took).
+            start = s.find("{", end)
 
-        depth = 0
-        i = end
-        while i >= 0:
-            ch = s[i]
-            if ch == '"':
-                # Count consecutive backslashes immediately before this `"` to
-                # determine whether it is escaped. Odd count → escaped (not a
-                # string delimiter); even count (incl. zero) → real delimiter.
-                k, j = 0, i - 1
-                while j >= 0 and s[j] == "\\":
-                    k += 1
-                    j -= 1
-                if k % 2 == 0:
-                    # Unescaped `"` — scan further backwards to skip the string literal.
-                    i -= 1
-                    while i >= 0:
-                        c2 = s[i]
-                        if c2 == '"':
-                            k2, j2 = 0, i - 1
-                            while j2 >= 0 and s[j2] == "\\":
-                                k2 += 1
-                                j2 -= 1
-                            if k2 % 2 == 0:
-                                break  # found the opening `"` of this string literal
-                        i -= 1
-            elif ch == "}":
-                depth += 1
-            elif ch == "{":
-                depth -= 1
-                if depth == 0:
-                    return s[i:end + 1]
-            i -= 1
-
-        return s  # fallback — gate will reject as malformed
+        # Prefer the last well-formed envelope; else the last top-level object (the
+        # contract puts the real output last); else the text as-is for the gate to reject.
+        if envelope_match is not None:
+            return envelope_match
+        return last_object if last_object is not None else s

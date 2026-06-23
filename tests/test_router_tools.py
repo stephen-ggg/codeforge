@@ -537,7 +537,7 @@ class TestExtractJson:
 
     def test_json_with_embedded_code_strings_containing_braces(self) -> None:
         # The JSON itself contains TypeScript/CSS code as string values with braces.
-        # The backward string-skip must not be confused by them.
+        # The real lexer treats them as string content, not structure.
         code = "const x = { a: 1 }; function f() { return x; }"
         import json as _json
         payload = _json.dumps({"output": {"code": code}, "confidence": 0.9})
@@ -545,19 +545,69 @@ class TestExtractJson:
         assert ModelRouter._extract_json(text) == payload
 
     def test_json_with_escaped_quotes_in_strings(self) -> None:
-        # Escaped `\"` inside a JSON string must not confuse the string-boundary
-        # detection during the backward scan.
+        # Escaped `\"` inside a JSON string is handled by the real lexer.
         import json as _json
         payload = _json.dumps({"output": {"msg": 'say "hello"'}, "confidence": 1.0})
         text = "Some prose.\n" + payload
         assert ModelRouter._extract_json(text) == payload
 
     def test_returns_last_json_object_when_multiple_present(self) -> None:
-        # If two top-level JSON objects appear, return the last one.
+        # If two top-level JSON objects appear (neither a full envelope), return the
+        # last one — the contract puts the real output last.
         first = '{"output": {"v": 1}}'
         second = '{"output": {"v": 2}}'
         text = f"Old attempt: {first}\nNew attempt: {second}"
         assert ModelRouter._extract_json(text) == second
+
+    def test_envelope_followed_by_trailing_snippet_returns_envelope(self) -> None:
+        # Regression: run-097cfe57faf8 / run-1090a5aa6337. The model emitted a full
+        # envelope and then appended a standalone TestCase/CodeFile object. The old
+        # backward scan anchored on the trailing snippet's `}` and returned the
+        # snippet (→ "4 missing required fields"). The envelope must win.
+        import json as _json
+        envelope = _json.dumps({
+            "output": {"test_cases": [{"id": "TC-001"}]},
+            "assumptions_made": [],
+            "confidence": 0.9,
+            "unresolved_flags": [],
+        })
+        snippet = _json.dumps({"path": "a.test.ts", "content": "x", "language": "ts"})
+        text = f"Here are the tests.\n\n{envelope}\n\nExample of the last file:\n{snippet}"
+        assert ModelRouter._extract_json(text) == envelope
+
+    def test_envelope_followed_by_trailing_prose_returns_envelope(self) -> None:
+        # A postscript after the JSON must not break extraction.
+        import json as _json
+        envelope = _json.dumps({
+            "output": {"ok": True},
+            "assumptions_made": [],
+            "confidence": 1.0,
+            "unresolved_flags": [],
+        })
+        text = f"{envelope}\n\nLet me know if you'd like any changes!"
+        assert ModelRouter._extract_json(text) == envelope
+
+    def test_envelope_preferred_over_decoy_json_in_reasoning(self) -> None:
+        # The model quotes a JSON snippet in its reasoning, then emits the real
+        # envelope. The envelope (carrying all four keys) must be selected even
+        # though the decoy parses as valid JSON and appears first.
+        import json as _json
+        decoy = _json.dumps({"name": "foo", "type": "unit"})
+        envelope = _json.dumps({
+            "output": {"ok": True},
+            "assumptions_made": [],
+            "confidence": 0.8,
+            "unresolved_flags": [],
+        })
+        text = f"The interface looks like {decoy} so I will test it.\n{envelope}"
+        assert ModelRouter._extract_json(text) == envelope
+
+    def test_bare_inner_object_without_envelope_returned_for_gate_to_reject(self) -> None:
+        # When the model emits only a bare object (no envelope anywhere), surface it
+        # unchanged so the schema_valid gate reports the real error instead of the
+        # extractor masking it.
+        bare = '{"id": "TC-007", "title": "x", "type": "unit"}'
+        assert ModelRouter._extract_json(f"Reasoning.\n{bare}") == bare
 
     def test_empty_string_returned_as_is(self) -> None:
         assert ModelRouter._extract_json("") == ""
