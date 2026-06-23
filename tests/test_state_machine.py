@@ -216,11 +216,11 @@ def test_malformed_exhausted_persists_raw_and_links(
 def test_truncated_output_falls_through_to_gate(
     sm: StateMachine, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """finish_reason=length no longer bypasses gate evaluation.
+    """finish_reason=length does not bypass gate evaluation.
 
     _invoke_agent returns the (truncated) content so the calling phase can route it
-    through schema_valid → malformed_output retries, giving transient API errors a
-    recovery path instead of immediately escalating as output_truncated."""
+    through the gate. It records the truncation on _last_truncated so the structural
+    failure handler can pick the bounded truncation path; it does not escalate here."""
     import logging
     from codeforge.model_router.router import RouterResult
 
@@ -238,34 +238,47 @@ def test_truncated_output_falls_through_to_gate(
 
     # Content is returned (not suppressed); caller drives gate evaluation.
     assert result == partial
+    # The truncation is recorded for the structural failure handler.
+    assert sm._last_truncated is True
     # Warning is emitted so finish_reason=length is visible in logs.
     assert any("finish_reason=length" in r.message for r in caplog.records)
-    # No escalation was raised — the malformed/retry path owns that decision.
+    # No escalation was raised — the truncation/retry path owns that decision.
     assert sm.run.escalations == []
 
 
-def test_truncated_output_exhausts_malformed_budget(
-    sm: StateMachine, run_log_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_truncated_output_first_failure_reprompts_on_own_budget(
+    sm: StateMachine, run_log_dir: Path
 ) -> None:
-    """Genuine max_tokens truncation exhausts malformed_output_retries and escalates
-    as max_retries_exceeded — same path as any unparseable structural failure."""
-    from codeforge.model_router.router import RouterResult
-
+    """A first finish_reason=length re-prompts (covering a transient hiccup) on the
+    dedicated truncation_retry budget — it does NOT spend the malformed_output budget."""
     partial = '{"output": {"files": [{"path": "a.py", "content": "<cut off at max_tokens'
-    monkeypatch.setattr(
-        sm.router,
-        "complete",
-        lambda **kwargs: RouterResult(
-            content=partial, litellm_call_id="call-1", model_used="m", truncated=True
-        ),
-    )
-    # Exhaust the malformed budget so the next structural failure escalates.
-    sm.run.retry_counters.malformed_output = 99
+    gr = _malformed_gate_result()
+
+    reprompt = sm._handle_structural_failure(partial, "coder", gr, truncated=True)
+
+    assert reprompt is gr.malformed_reprompt
+    assert sm.run.retry_counters.truncation_retry == 1
+    assert sm.run.retry_counters.malformed_output == 0  # untouched
+    assert sm.run.escalations == []
+    # Within budget: nothing persisted (the output is not terminal).
+    raw_dir = run_log_dir / sm.run.run_id / "raw_outputs"
+    assert not any(raw_dir.glob("*.json"))
+
+
+def test_consecutive_truncation_escalates_as_output_truncated(
+    sm: StateMachine, run_log_dir: Path
+) -> None:
+    """A second, consecutive max_tokens truncation is genuine: escalate as
+    output_truncated (not malformed_output) so the operator gets the right remedy
+    (raise max_tokens / smaller unit of work) rather than a reset-and-retry loop."""
+    partial = '{"output": {"files": [{"path": "a.py", "content": "<cut off at max_tokens'
+    # First truncation already consumed the one-shot truncation_retry budget.
+    sm.run.retry_counters.truncation_retry = 1
     gr = _malformed_gate_result()
 
     with pytest.raises(EscalationError) as exc:
-        sm._handle_structural_failure(partial, "coder", gr)
-    assert exc.value.reason == "malformed_output"
+        sm._handle_structural_failure(partial, "coder", gr, truncated=True)
+    assert exc.value.reason == "output_truncated"
 
     # The partial response is persisted and linked from the escalation.
     artifact_id = sm.run.escalations[-1].agent_output_ref

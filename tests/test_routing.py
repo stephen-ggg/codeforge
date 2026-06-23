@@ -14,6 +14,7 @@ from codeforge.orchestrator.routing import (
     route_test_analysis_recoverable_error,
     route_test_analysis_spec_gap,
     route_test_analysis_test_bug,
+    route_truncated,
 )
 from codeforge.schemas.contracts import RetryCounters
 
@@ -177,3 +178,30 @@ def test_spec_gap_routes_at_limit_minus_one() -> None:
 def test_spec_gap_escalates_at_limit() -> None:
     out = route_test_analysis_spec_gap(RetryCounters(test_loop=2), _CONFIG)
     assert out.decision == "escalate"
+
+
+# ----------------------------------------------------------------------
+# finish_reason=length truncation
+# ----------------------------------------------------------------------
+
+_TRUNC_CONFIG = {"retry_limits": {"truncation_retries": 1}}
+
+
+def test_truncation_first_failure_reprompts_on_own_budget() -> None:
+    out = route_truncated(RetryCounters(), _TRUNC_CONFIG, "test_designer")
+    assert out.decision == "re_prompt_same_agent"
+    assert out.next_state == "test_designer_reprompt"
+    assert out.row_id == "output_truncated_retry"
+    assert out.counter_deltas == {"truncation_retry": 1}
+    # The malformed budget is never touched by the truncation path.
+    assert "malformed_output" not in out.counter_deltas
+
+
+def test_consecutive_truncation_escalates_as_output_truncated() -> None:
+    out = route_truncated(RetryCounters(truncation_retry=1), _TRUNC_CONFIG, "test_designer")
+    assert out.decision == "escalate"
+    assert out.next_state == "failed_escalated"
+    assert out.row_id == "output_truncated"
+    # The reason must be output_truncated, not malformed_output, so the operator is
+    # steered to raise max_tokens / shrink the unit of work rather than reset-and-retry.
+    assert out.escalation_reason == "output_truncated"

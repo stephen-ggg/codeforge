@@ -44,7 +44,19 @@ _REENTRY_BY_REASON: dict[str, list[str]] = {
     "block_flag": ["requirements_clarification", "architecture", "coding"],
     "low_confidence": ["requirements_clarification", "architecture", "coding", "code_review"],
     "global_ceiling_exceeded": [],
-    "malformed_output": ["requirements_clarification"],
+    # malformed_output is structurally identical to output_truncated — the agent
+    # produced unusable output, but every upstream artifact is valid. Offer the full
+    # phase chain so the operator can re-enter at the phase that failed (the
+    # escalation's suggested_reentry_state) instead of redoing the whole pipeline.
+    "malformed_output": [
+        "requirements_clarification",
+        "architecture",
+        "coding",
+        "code_review",
+        "test_design",
+        "test_execution",
+        "commit",
+    ],
     "output_truncated": [
         "requirements_clarification",
         "architecture",
@@ -64,6 +76,37 @@ _REENTRY_BY_REASON: dict[str, list[str]] = {
     ],
     "schema_version_mismatch": ["requirements_clarification"],
 }
+
+# Canonical pipeline order. A run may only re-enter at the phase that failed or an
+# earlier one: phases AFTER the failure never ran, so their inputs do not exist yet
+# (e.g. test_execution and commit need a test_suite that a failed test_design never
+# produced). Re-entering downstream would crash on a missing artifact or commit code
+# that was never tested.
+_PHASE_ORDER: tuple[str, ...] = (
+    "requirements_clarification",
+    "architecture",
+    "coding",
+    "code_review",
+    "test_design",
+    "test_execution",
+    "commit",
+)
+
+
+def reentry_options_for(reason: str, failed_phase: str | None) -> list[str]:
+    """Reentry states to offer for an escalation.
+
+    The per-reason allowlist (`_REENTRY_BY_REASON`) says which phases make sense to
+    restart from for a given failure type; this additionally bounds them to the
+    failing phase so the operator can never re-enter downstream of where the run
+    actually stopped. A None/unknown failing phase falls back to the unbounded list.
+    """
+    options = list(_REENTRY_BY_REASON.get(reason, []))
+    if failed_phase not in _PHASE_ORDER:
+        return options
+    cutoff = _PHASE_ORDER.index(failed_phase)
+    return [o for o in options if o in _PHASE_ORDER and _PHASE_ORDER.index(o) <= cutoff]
+
 
 _SEPARATOR = "-" * 60
 
@@ -210,7 +253,9 @@ class HumanInteraction:
         if suggestion:
             print(f"Failed during: {suggestion}")
 
-        reentry_options = _REENTRY_BY_REASON.get(event.reason, [])
+        # Bound the offered states to the failing phase — never re-enter downstream
+        # of where the run stopped (those phases' artifacts were never produced).
+        reentry_options = reentry_options_for(event.reason, suggestion)
 
         print("\nOptions:")
         print("  1. Approve  — continue with human-directed reentry")

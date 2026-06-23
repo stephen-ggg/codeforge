@@ -108,6 +108,11 @@ pipeline consequences are given a specific list of what to think through, under
 "Reasoning guidance" below; for those agents, completing that reasoning before emitting
 anything is mandatory.
 
+All reasoning goes **before** the JSON object. The JSON object is the **last** thing in
+your response: after its closing `}` emit nothing — no trailing prose, no second JSON
+object, no example, no recap, no commentary, no closing remarks. Anything after the
+closing brace makes your output unparseable and your turn is discarded.
+
 ## The output envelope
 
 Every output you produce is wrapped in the same envelope. The `output` field holds your

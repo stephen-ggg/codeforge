@@ -94,3 +94,54 @@ def test_resolved_without_directive_defaults_to_requirements() -> None:
     escalation, needs_prompt = _select_resume_escalation(_run(esc))
     assert needs_prompt is False
     assert _initial_state_from(escalation) == "requirements"
+
+
+def test_malformed_output_reentry_allowlist_matches_output_truncated() -> None:
+    """malformed_output must allow the full phase chain like output_truncated, so the
+    operator can re-enter at the escalation's suggested phase (e.g. test_design) rather
+    than being forced into a full-pipeline restart from requirements_clarification."""
+    from typing import get_args
+
+    from codeforge.cli.interaction import _REENTRY_BY_REASON
+    from codeforge.schemas.contracts import ReentryState
+
+    malformed = _REENTRY_BY_REASON["malformed_output"]
+    assert "test_design" in malformed
+    # Structurally identical to output_truncated — keep the two in lockstep.
+    assert malformed == _REENTRY_BY_REASON["output_truncated"]
+    # Every offered option must be a valid ReentryState.
+    assert set(malformed) <= set(get_args(ReentryState))
+
+
+def test_reentry_options_bounded_by_failing_phase() -> None:
+    """A run that failed in test_design must never be offered a downstream phase
+    (test_execution / commit) — those phases never ran, so their artifacts (the
+    test_suite) don't exist. This is the run-097cfe57faf8 case."""
+    from codeforge.cli.interaction import reentry_options_for
+
+    opts = reentry_options_for("malformed_output", "test_design")
+    assert "test_design" in opts
+    assert "test_execution" not in opts
+    assert "commit" not in opts
+    # Everything at or before the failing phase remains available.
+    assert opts == [
+        "requirements_clarification",
+        "architecture",
+        "coding",
+        "code_review",
+        "test_design",
+    ]
+
+
+def test_reentry_options_unbounded_when_phase_unknown() -> None:
+    """A None/unknown failing phase falls back to the full per-reason allowlist."""
+    from codeforge.cli.interaction import _REENTRY_BY_REASON, reentry_options_for
+
+    assert reentry_options_for("malformed_output", None) == _REENTRY_BY_REASON["malformed_output"]
+
+
+def test_reentry_options_allow_commit_when_commit_is_the_failing_phase() -> None:
+    """commit_failure failed at commit, so everything completed — commit stays valid."""
+    from codeforge.cli.interaction import reentry_options_for
+
+    assert reentry_options_for("commit_failure", "commit") == ["commit"]

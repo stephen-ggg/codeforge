@@ -28,7 +28,7 @@ class RunMode(str, Enum):
     new_project = "new_project"
     continuation = "continuation"
 
-from codeforge.cli.interaction import HumanInteraction
+from codeforge.cli.interaction import HumanInteraction, reentry_options_for
 from codeforge.cli.lock import CodeforgeAlreadyRunningError, CodeforgeLock
 from codeforge.config.config_loader import load_config
 from codeforge.orchestrator.state_machine import EscalationError, StateMachine
@@ -276,6 +276,7 @@ def _build_noninteractive_resolution(
     instructions: Optional[str],
     notes: Optional[str],
     suggested_reentry: Optional[str],
+    reason: str,
 ) -> "EscalationResolution":
     """Build an EscalationResolution from CLI flags without prompting."""
     decision = decision.lower().strip()
@@ -294,6 +295,20 @@ def _build_noninteractive_resolution(
             err=True,
         )
         raise typer.Exit(1)
+
+    # Reject an explicit reentry state downstream of the failing phase (or not allowed
+    # for this reason) — mirrors the bounded interactive menu so a run that died in
+    # test_design can't be resumed straight into commit on artifacts that don't exist.
+    if reentry_state is not None:
+        valid = reentry_options_for(reason, suggested_reentry)
+        if valid and reentry_state not in valid:
+            typer.echo(
+                f"--reentry-state {reentry_state!r} is not valid for a {reason} "
+                f"escalation that failed at {suggested_reentry!r}. "
+                f"Valid options: {', '.join(valid)}.",
+                err=True,
+            )
+            raise typer.Exit(1)
 
     counter_list: list[str] = []
     if reset_counters:
@@ -566,6 +581,7 @@ def resume(
                     instructions=instructions,
                     notes=notes,
                     suggested_reentry=getattr(escalation, "suggested_reentry_state", None),
+                    reason=escalation.reason,
                 )
             else:
                 typer.echo(f"\nResuming run {run_id} — pending escalation:")
