@@ -779,7 +779,7 @@ def _load_config_or_exit(project_dir: Path) -> Any:
         return load_config(
             project_dir,
             require_sandbox_image=True,
-            require_repos=True,
+            require_repos=False,
             require_env_vars=True,
         )
     except (ValueError, EnvironmentError, FileNotFoundError) as exc:

@@ -501,6 +501,77 @@ def test_tool_loop_retry_exhaustion_falls_to_forced_final(monkeypatch, minimal_c
     assert call_count["n"] == 1 + router_mod._MAX_ATTEMPTS + 1
 
 
+# ---------------------------------------------------------------------------
+# _extract_json unit tests
+# ---------------------------------------------------------------------------
+
+class TestExtractJson:
+    """Direct unit tests for the static _extract_json method."""
+
+    def test_pure_json_fast_path(self) -> None:
+        payload = '{"output": {"ok": true}, "confidence": 0.9}'
+        assert ModelRouter._extract_json(payload) == payload
+
+    def test_markdown_fenced_json(self) -> None:
+        payload = '```json\n{"output": {"ok": true}}\n```'
+        assert ModelRouter._extract_json(payload) == '{"output": {"ok": true}}'
+
+    def test_prose_with_balanced_braces_before_json(self) -> None:
+        # Balanced prose braces (one `{` matched by one `}`) before the JSON.
+        text = 'The selector `#id { color: red; }` is forbidden.\n{"output": {"ok": true}}'
+        assert ModelRouter._extract_json(text) == '{"output": {"ok": true}}'
+
+    def test_prose_with_unmatched_open_brace_in_regex(self) -> None:
+        # Exact failure pattern from run-ba324491e0f9: regex patterns in
+        # backtick spans produce `{` without a following `}`.
+        text = (
+            'Use `/^\\s*#[a-zA-Z][a-zA-Z0-9_-]*\\s*[{,]/m` for selectors.\n'
+            '{"output": {"ok": true}}'
+        )
+        assert ModelRouter._extract_json(text) == '{"output": {"ok": true}}'
+
+    def test_prose_open_braces_outnumber_close_braces(self) -> None:
+        # Three unmatched `{` in prose, zero matching `}` in prose.
+        text = 'Patterns: `{`, `{id}`, `{n,m` — none closed.\n{"output": {"ok": true}}'
+        assert ModelRouter._extract_json(text) == '{"output": {"ok": true}}'
+
+    def test_json_with_embedded_code_strings_containing_braces(self) -> None:
+        # The JSON itself contains TypeScript/CSS code as string values with braces.
+        # The backward string-skip must not be confused by them.
+        code = "const x = { a: 1 }; function f() { return x; }"
+        import json as _json
+        payload = _json.dumps({"output": {"code": code}, "confidence": 0.9})
+        text = "Reasoning prose here.\n" + payload
+        assert ModelRouter._extract_json(text) == payload
+
+    def test_json_with_escaped_quotes_in_strings(self) -> None:
+        # Escaped `\"` inside a JSON string must not confuse the string-boundary
+        # detection during the backward scan.
+        import json as _json
+        payload = _json.dumps({"output": {"msg": 'say "hello"'}, "confidence": 1.0})
+        text = "Some prose.\n" + payload
+        assert ModelRouter._extract_json(text) == payload
+
+    def test_returns_last_json_object_when_multiple_present(self) -> None:
+        # If two top-level JSON objects appear, return the last one.
+        first = '{"output": {"v": 1}}'
+        second = '{"output": {"v": 2}}'
+        text = f"Old attempt: {first}\nNew attempt: {second}"
+        assert ModelRouter._extract_json(text) == second
+
+    def test_empty_string_returned_as_is(self) -> None:
+        assert ModelRouter._extract_json("") == ""
+
+    def test_no_closing_brace_returned_as_is(self) -> None:
+        text = 'This string has no closing brace {"oops":'
+        # No `}` found — returns original stripped string for gate to reject.
+        assert ModelRouter._extract_json(text) == text.strip()
+
+    def test_whitespace_around_json_stripped(self) -> None:
+        payload = '{"output": {"ok": true}}'
+        assert ModelRouter._extract_json(f"\n  {payload}  \n") == payload
+
+
 def test_streaming_transient_error_retried(monkeypatch, minimal_config: ConfigSnapshot) -> None:
     """ServiceUnavailableError on first stream creation triggers retry; second succeeds."""
     call_count = {"n": 0}
