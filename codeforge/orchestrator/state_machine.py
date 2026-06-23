@@ -789,7 +789,7 @@ class StateMachine:
                 agent_call_count=self.run.agent_call_count,
             )
 
-            if not gate_result.structural_passed:
+            if not gate_result.structural_passed or not gate_result.contract_passed:
                 reprompt = self._handle_structural_failure(
                     raw, "requirements_analyst", gate_result
                 )

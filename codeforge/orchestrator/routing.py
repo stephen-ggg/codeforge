@@ -510,8 +510,16 @@ def route_test_analysis_code_bug(
             decision="retry_same_agent",
             next_state="coding",
             counter_deltas={"test_loop": 1},
-            # fresh coder invocation — restore its per-invocation re-prompt cushion.
-            counter_resets=["coder_low_confidence_reprompt", "malformed_output", "truncation_retry"],
+            # Re-enters coding, which re-runs the full coder → code_review →
+            # security_review pipeline. Restore the coder's per-invocation re-prompt
+            # cushion AND the review-loop budgets that the re-run will consume again.
+            counter_resets=[
+                "coder_low_confidence_reprompt",
+                "code_review_loop",
+                "security_review_loop",
+                "malformed_output",
+                "truncation_retry",
+            ],
         )
     return RoutingOutcome(
         row_id="test_analysis_code_bug_exhausted",
@@ -570,6 +578,8 @@ def route_test_analysis_spec_gap(
                 "coder_low_confidence_reprompt",
                 "code_reviewer_low_confidence_reprompt",
                 "security_reviewer_low_confidence_reprompt",
+                "test_designer_low_confidence_reprompt",
+                "test_analyst_low_confidence_reprompt",
                 "malformed_output",
                 "truncation_retry",
             ],

@@ -371,6 +371,38 @@ def test_contract_failure_persists_output_to_failed_artifacts(
     assert not (run_dir / "artifacts" / f"{artifact_id}.json").exists()
 
 
+def test_requirements_contract_failure_is_not_accepted_as_success(
+    sm: StateMachine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schema-valid but contract-violating requirements output must route through the
+    re-prompt/escalate path — not fall through both guards and be accepted as a valid
+    doc. Regression: run_requirements had no contract_passed branch, so a contract
+    failure (which leaves policy_passed defaulting True) was silently treated as success."""
+    import types
+    from codeforge.agents.requirements_analyst import RequirementsAnalystAgent
+
+    fake_pkg = types.SimpleNamespace(state_documents={}, assembly_id="asm-1")
+    monkeypatch.setattr(sm.assembler, "assemble", lambda *a, **k: fake_pkg)
+    monkeypatch.setattr(
+        RequirementsAnalystAgent, "build_user_turn", lambda self, pkg, reprompt: "turn"
+    )
+    monkeypatch.setattr(sm, "_invoke_agent", lambda *a, **k: '{"status": "complete"}')
+
+    gr = GateResult()
+    gr.contract_passed = False  # structural_passed/policy_passed stay True
+    monkeypatch.setattr(sm.gates, "evaluate", lambda **k: gr)
+
+    # Exhaust the shared malformed budget so the contract failure escalates (via
+    # route_malformed) rather than looping forever on re-prompts.
+    limit = sm._config.to_dict().get("retry_limits", {}).get("malformed_output_retries", 2)
+    sm.run.retry_counters = sm.run.retry_counters.model_copy(
+        update={"malformed_output": limit}
+    )
+
+    with pytest.raises(EscalationError):
+        sm.run_requirements("brief", object(), "system prompt")
+
+
 def test_format_policy_detail_without_summary(sm: StateMachine) -> None:
     """Payloads lacking a summary degrade gracefully — no crash, segment omitted."""
     output = AgentOutput(
