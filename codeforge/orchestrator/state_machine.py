@@ -20,11 +20,11 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import Any, Callable, NoReturn, cast
 
 logger = logging.getLogger(__name__)
 
-from codeforge.config.config_loader import ConfigSnapshot
+from codeforge.config.config_loader import ConfigSnapshot, diff_config_snapshots
 from codeforge.firewall.assembler import ContextAssembler, ContextPackage
 from codeforge.firewall.manifest import FirewallManifest, load_manifest
 from codeforge.model_router.router import ModelRouter
@@ -132,6 +132,37 @@ class EscalationError(Exception):
         super().__init__(f"Codeforge escalated: {reason} — {context}")
 
 
+class ConfigChangedError(Exception):
+    """Raised on resume when the on-disk config differs from the run's persisted
+    snapshot and the operator has not opted in to the change.
+
+    Carries the structured diff (from diff_config_snapshots) so the CLI can render
+    it for the operator. No config mutation has occurred when this is raised — the
+    persisted snapshot is left intact.
+    """
+
+    def __init__(self, changes: list[dict[str, Any]]) -> None:
+        self.changes = changes
+        super().__init__(f"Config changed since run start ({len(changes)} field(s))")
+
+
+class SchemaVersionMismatchError(Exception):
+    """Raised on resume when the run's persisted config schema_version differs from
+    the current config's. A hard block (not overridable by --allow-config-change):
+    a schema change can make persisted artifacts incompatible.
+    """
+
+    reason: EscalationReason = "schema_version_mismatch"
+
+    def __init__(self, persisted: str, current: str) -> None:
+        self.persisted = persisted
+        self.current = current
+        super().__init__(
+            f"Config schema_version changed since run start: "
+            f"persisted={persisted!r} current={current!r}"
+        )
+
+
 class StateMachine:
     """
     Codeforge orchestrator state machine.
@@ -232,9 +263,13 @@ class StateMachine:
         return self._run
 
     def resume_run(self, run: CodeforgeRun) -> None:
-        """Restore state from a persisted CodeforgeRun (codeforge resume command)."""
+        """Restore state from a persisted CodeforgeRun (codeforge resume command).
+
+        The persisted config_snapshot is left intact here; config reconciliation
+        (schema-version gate + drift detection / opt-in) is handled separately by
+        reconcile_config_on_resume(), which the CLI calls immediately after this.
+        """
         self._run = run
-        self._run.config_snapshot = self._config.to_dict()
         run_log_dir = self._run_log_dir / run.run_id
         self._artifact_store = ArtifactStore(run_log_dir)
         self._pending = PendingWrites(self._project_state)
@@ -253,6 +288,82 @@ class StateMachine:
             run_log_dir=run_log_dir,
             source_root=Path(repos.source_code.path) if repos and repos.source_code.path else None,
         )
+
+    def reconcile_config_on_resume(
+        self,
+        *,
+        allow_config_change: bool,
+        interactive_confirm: "Callable[[list[dict[str, Any]]], bool] | None" = None,
+    ) -> None:
+        """Reconcile the persisted config snapshot against the current config.
+
+        Must be called after resume_run() (it relies on the event log + run object).
+
+        - Schema gate (hard): if the persisted config schema_version differs from the
+          current one, emit a failing schema_version_match gate and raise
+          SchemaVersionMismatchError. Never overridable — a schema change can make
+          persisted artifacts incompatible. Deliberately does NOT stack an
+          EscalationEvent (reconciliation re-runs every resume, which would compound
+          into an unresumable loop).
+        - Config drift (soft): diff the remaining fields. With no changes, the snapshot
+          already matches and is left as-is. With changes, proceed only when the
+          operator opted in (allow_config_change, or interactive_confirm returns True);
+          then record the change and adopt the current config. Otherwise raise
+          ConfigChangedError with the diff and leave the snapshot untouched.
+        """
+        persisted = dict(self.run.config_snapshot)
+        current = self._config.to_dict()
+
+        persisted_schema = persisted.get("schema_version")
+        current_schema = current.get("schema_version")
+        schema_ok = persisted_schema == current_schema
+        self.event_log.emit_gate(
+            rule="schema_version_match",
+            passed=schema_ok,
+            source_agent="orchestrator",
+            counters=self._counters_snap(),
+            detail=f"persisted={persisted_schema} current={current_schema}",
+        )
+        if not schema_ok:
+            raise SchemaVersionMismatchError(
+                str(persisted_schema), str(current_schema)
+            )
+
+        changes = diff_config_snapshots(persisted, current)
+        if not changes:
+            return
+
+        approved = allow_config_change or (
+            interactive_confirm is not None and interactive_confirm(changes)
+        )
+        if not approved:
+            raise ConfigChangedError(changes)
+
+        self.record_config_change(changes)
+
+    def record_config_change(self, changes: list[dict[str, Any]]) -> None:
+        """Record an operator-approved config change and adopt the current config.
+
+        Appends a structured entry (with old+new values, so the original config stays
+        reconstructable) to run.config_resume_changes, mirrors it into decisions_log as
+        best-effort context, then updates config_snapshot to the current config and
+        re-persists the run snapshot.
+        """
+        self.run.config_resume_changes.append({
+            "resumed_at": _now(),
+            "changes": changes,
+        })
+        self.pending.merge_append("decisions_log", [{
+            "entry_id": str(uuid.uuid4()),
+            "run_id": self.run.run_id,
+            "entry_type": "human_override",
+            "source_agent": None,
+            "decision": "config_change_on_resume",
+            "rationale": json.dumps(changes),
+            "created_at": _now(),
+        }])
+        self.run.config_snapshot = self._config.to_dict()
+        self.event_log.update_run_snapshot(self.run)
 
     # ------------------------------------------------------------------
     # Properties (convenience accessors with assertion)

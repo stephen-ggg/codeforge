@@ -293,6 +293,37 @@ def load_config(
     return snapshot
 
 
+def diff_config_snapshots(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, Any]]:
+    """Diff two config snapshot dicts (the output of ConfigSnapshot.to_dict()).
+
+    Returns a flat list of changes, each {"path": "retry_limits.test_loop",
+    "old": <value>, "new": <value>}. Nested dicts are walked recursively and
+    reported by dotted path; any non-dict value (including lists) is compared by
+    equality and reported whole. Keys present on only one side are reported with
+    the missing side as None.
+
+    Both inputs come from to_dict(), which already excludes the secret fields
+    (anthropic_api_key / github_token), so secrets never appear here. schema_version
+    is excluded — it is owned by the resume schema-version gate and reported there.
+    """
+    changes: list[dict[str, Any]] = []
+
+    def walk(prefix: str, a: dict[str, Any], b: dict[str, Any]) -> None:
+        for key in sorted(set(a) | set(b)):
+            if not prefix and key == "schema_version":
+                continue
+            path = f"{prefix}.{key}" if prefix else key
+            av = a.get(key)
+            bv = b.get(key)
+            if isinstance(av, dict) and isinstance(bv, dict):
+                walk(path, av, bv)
+            elif av != bv:
+                changes.append({"path": path, "old": av, "new": bv})
+
+    walk("", old, new)
+    return changes
+
+
 def _parse_config(raw: dict[str, Any]) -> ConfigSnapshot:
     """Parse a merged raw config dict into a typed ConfigSnapshot."""
     retry_limits = RetryLimitsConfig(**raw.get("retry_limits", {}))

@@ -960,6 +960,12 @@ class CodeforgeRun(BaseModel):
     artifacts: dict[str, ArtifactRef | None] = Field(default_factory=dict)
     escalations: list[EscalationEvent] = Field(default_factory=list)
 
+    # Audit trail of config changes accepted on resume. Each entry:
+    # {"resumed_at": iso, "changes": [{"path": ..., "old": ..., "new": ...}, ...]}.
+    # Because each entry carries old+new, the original config values stay
+    # reconstructable even though config_snapshot is updated to the latest config.
+    config_resume_changes: list[dict[str, Any]] = Field(default_factory=list)
+
 
 # ===========================================================================
 # Part 6 — Project state document schemas

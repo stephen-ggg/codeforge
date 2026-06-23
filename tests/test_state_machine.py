@@ -19,17 +19,21 @@ from codeforge.orchestrator.routing import (
     route_test_analysis_recoverable_error,
 )
 from codeforge.orchestrator.state_machine import (
+    ConfigChangedError,
     EscalationError,
+    SchemaVersionMismatchError,
     StateMachine,
     _build_dep_fix_context,
     _build_env_fix_context,
 )
 from codeforge.schemas.contracts import (
     AgentOutput,
+    CodeforgeRun,
     FailureAnalysis,
     Flag,
     LowConfidenceRePrompt,
     MalformedOutputRePrompt,
+    RetryCounters,
     TestAnalysis,
     TestRunnerResults,
 )
@@ -46,6 +50,102 @@ def _gate_events(run_log_dir: Path, run_id: str) -> list[dict[str, Any]]:
     path = run_log_dir / run_id / "events.jsonl"
     events = [json.loads(line) for line in path.read_text().splitlines()]
     return [e for e in events if e.get("event_type") == "gate"]
+
+
+def _persisted_run(config_snapshot: dict[str, Any]) -> CodeforgeRun:
+    return CodeforgeRun(
+        run_id="run-resume-test",
+        codeforge_version="codeforge-v1",
+        run_mode="new_project",
+        started_at="2026-06-15T00:00:00+00:00",
+        status="failed_escalated",  # type: ignore[arg-type]
+        config_snapshot=config_snapshot,
+        retry_counters=RetryCounters(),
+    )
+
+
+def test_reconcile_no_drift_is_silent(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    run = _persisted_run(minimal_config.to_dict())
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    sm.reconcile_config_on_resume(allow_config_change=False)
+    assert sm.run.config_resume_changes == []
+    gates = _gate_events(run_log_dir, run.run_id)
+    assert any(g["rule"] == "schema_version_match" and g["passed"] for g in gates)
+
+
+def test_reconcile_schema_mismatch_blocks_even_when_allowed(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    snap = minimal_config.to_dict()
+    snap["schema_version"] = "0.0.0-old"
+    run = _persisted_run(snap)
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    # allow_config_change must NOT override the schema gate.
+    with pytest.raises(SchemaVersionMismatchError):
+        sm.reconcile_config_on_resume(allow_config_change=True)
+    gates = _gate_events(run_log_dir, run.run_id)
+    assert any(g["rule"] == "schema_version_match" and not g["passed"] for g in gates)
+
+
+def test_reconcile_drift_blocks_without_optin(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    snap = minimal_config.to_dict()
+    original = snap["retry_limits"]["test_loop"]
+    snap["retry_limits"]["test_loop"] = original + 5
+    run = _persisted_run(snap)
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    with pytest.raises(ConfigChangedError) as exc_info:
+        sm.reconcile_config_on_resume(allow_config_change=False)
+    assert any(c["path"] == "retry_limits.test_loop" for c in exc_info.value.changes)
+    # Persisted snapshot left untouched, nothing recorded.
+    assert sm.run.config_snapshot["retry_limits"]["test_loop"] == original + 5
+    assert sm.run.config_resume_changes == []
+
+
+def test_reconcile_drift_recorded_with_flag(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    snap = minimal_config.to_dict()
+    original = snap["retry_limits"]["test_loop"]
+    snap["retry_limits"]["test_loop"] = original + 5
+    run = _persisted_run(snap)
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    sm.reconcile_config_on_resume(allow_config_change=True)
+    # Snapshot adopts the current config; the change is recorded with old+new.
+    assert sm.run.config_snapshot["retry_limits"]["test_loop"] == original
+    assert len(sm.run.config_resume_changes) == 1
+    recorded = sm.run.config_resume_changes[0]["changes"]
+    assert {"path": "retry_limits.test_loop", "old": original + 5, "new": original} in recorded
+
+
+def test_reconcile_drift_recorded_with_interactive_confirm(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    snap = minimal_config.to_dict()
+    snap["retry_limits"]["test_loop"] = snap["retry_limits"]["test_loop"] + 5
+    run = _persisted_run(snap)
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    sm.reconcile_config_on_resume(
+        allow_config_change=False, interactive_confirm=lambda changes: True
+    )
+    assert len(sm.run.config_resume_changes) == 1
+
+    # A declining callback blocks.
+    run2 = _persisted_run(snap)
+    sm2 = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm2.resume_run(run2)
+    with pytest.raises(ConfigChangedError):
+        sm2.reconcile_config_on_resume(
+            allow_config_change=False, interactive_confirm=lambda changes: False
+        )
 
 
 def test_start_run_initialises_components(sm: StateMachine) -> None:

@@ -31,7 +31,12 @@ class RunMode(str, Enum):
 from codeforge.cli.interaction import HumanInteraction, reentry_options_for
 from codeforge.cli.lock import CodeforgeAlreadyRunningError, CodeforgeLock
 from codeforge.config.config_loader import load_config
-from codeforge.orchestrator.state_machine import EscalationError, StateMachine
+from codeforge.orchestrator.state_machine import (
+    ConfigChangedError,
+    EscalationError,
+    SchemaVersionMismatchError,
+    StateMachine,
+)
 from codeforge.schemas.contracts import (
     CodeforgeRun,
     CommitWriterInput,
@@ -138,6 +143,18 @@ def _initial_state_from(escalation: "EscalationEvent | None") -> str:
     if escalation and escalation.resolution and escalation.resolution.reentry_directive:
         return escalation.resolution.reentry_directive.reentry_state
     return "requirements"
+
+
+def _confirm_config_change(changes: list[dict[str, Any]]) -> bool:
+    """Interactive callback: show the config diff and ask the operator to confirm.
+
+    Used only on the interactive resume path; programmatic callers pass
+    --allow-config-change instead.
+    """
+    typer.echo("\nThe config has changed since this run started:")
+    for change in changes:
+        typer.echo(f"  {change['path']}: {change['old']!r} -> {change['new']!r}")
+    return typer.confirm("Resume under the new config? (the change will be recorded)")
 
 
 def _do_commit(
@@ -530,6 +547,15 @@ def resume(
         help="Non-interactive: human notes attached to the resolution.",
         show_default=False,
     ),
+    allow_config_change: bool = typer.Option(
+        False,
+        "--allow-config-change",
+        help=(
+            "Permit resuming under a config that differs from the run's persisted "
+            "snapshot. The change is recorded to the run's audit trail. A schema_version "
+            "change is never permitted (start a new run instead)."
+        ),
+    ),
 ) -> None:
     """
     Resume a codeforge run that was interrupted by an escalation.
@@ -606,6 +632,16 @@ def resume(
 
         sm.resume_run(codeforge_run)
 
+        # Reconcile the run's persisted config snapshot against the current on-disk
+        # config: hard-block on a schema_version change, and require explicit opt-in
+        # (flag or interactive confirm) for any other drift. Prompt only in
+        # interactive mode (no --decision); programmatic callers must pass the flag.
+        confirm_cb = None if decision is not None else _confirm_config_change
+        sm.reconcile_config_on_resume(
+            allow_config_change=allow_config_change,
+            interactive_confirm=confirm_cb,
+        )
+
         # Write human_override entry only when the operator just modified the run.
         # Gated on freshly_resolved so re-resumes don't duplicate the entry.
         if (
@@ -660,6 +696,31 @@ def resume(
         # Deliberate exits (rejection, succeeded guard) must propagate with their
         # own code and must not be treated as a terminal failure.
         raise
+
+    except SchemaVersionMismatchError as exc:
+        typer.echo(
+            f"\nCannot resume: {exc}.\n"
+            "A schema_version change can make persisted artifacts incompatible. "
+            "Start a new run instead.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    except ConfigChangedError as exc:
+        typer.echo(
+            "\nCannot resume: the config has changed since this run started.",
+            err=True,
+        )
+        for change in exc.changes:
+            typer.echo(
+                f"  {change['path']}: {change['old']!r} -> {change['new']!r}", err=True
+            )
+        typer.echo(
+            "\nRe-run with --allow-config-change to resume under the new config "
+            "(the change will be recorded to the run's audit trail).",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     except EscalationError as exc:
         typer.echo(f"\nCodeforge escalated again: {exc.reason}", err=True)
