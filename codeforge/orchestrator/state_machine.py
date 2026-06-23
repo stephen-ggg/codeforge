@@ -1567,6 +1567,16 @@ class StateMachine:
                     update={"malformed_output": 0, "coder_low_confidence_reprompt": 0}
                 )
 
+            # Re-entering test_design (e.g. after a test_designer malformed_output
+            # escalation): malformed_output is a shared, run-wide counter the prior
+            # session left exhausted, so without this reset the first re-prompt would
+            # immediately re-escalate. Mirror the coding reset for test_designer's
+            # per-invocation cushions.
+            if next_state == "test_design":
+                self.run.retry_counters = self.run.retry_counters.model_copy(
+                    update={"malformed_output": 0, "test_designer_low_confidence_reprompt": 0}
+                )
+
         while next_state != "done":
             if next_state == "architecture":
                 assert arch_doc is not None or next_state == "architecture"
