@@ -96,6 +96,42 @@ def test_resolved_without_directive_defaults_to_requirements() -> None:
     assert _initial_state_from(escalation) == "requirements"
 
 
+def test_initial_state_falls_back_to_suggested_reentry() -> None:
+    """A resolved escalation with no reentry_directive re-enters at the phase that was
+    running (suggested_reentry_state), not a full restart from requirements."""
+    esc = EscalationEvent(
+        escalation_id="esc-1",
+        triggered_at="2026-06-15T00:00:00+00:00",
+        reason="human_required",
+        agent_output_ref="a1",
+        resolved=True,
+        resolution=EscalationResolution(
+            outcome="approved", reentry_directive=None, human_notes=""
+        ),
+        suggested_reentry_state="coding",
+    )
+    assert _initial_state_from(esc) == "coding"
+
+
+def test_initial_state_directive_overrides_suggested() -> None:
+    esc = EscalationEvent(
+        escalation_id="esc-1",
+        triggered_at="2026-06-15T00:00:00+00:00",
+        reason="human_required",
+        agent_output_ref="a1",
+        resolved=True,
+        resolution=EscalationResolution(
+            outcome="approved",
+            reentry_directive=ReentryDirective(
+                reentry_state="test_design", counter_resets=[]
+            ),
+            human_notes="",
+        ),
+        suggested_reentry_state="coding",
+    )
+    assert _initial_state_from(esc) == "test_design"
+
+
 def test_malformed_output_reentry_allowlist_matches_output_truncated() -> None:
     """malformed_output must allow the full phase chain like output_truncated, so the
     operator can re-enter at the escalation's suggested phase (e.g. test_design) rather

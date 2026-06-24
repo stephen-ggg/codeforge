@@ -1675,10 +1675,16 @@ class StateMachine:
                 req_data = req_data["requirements_doc"]
             req_doc = RequirementsDoc(**req_data)
 
+            # Required-artifact checks: a phase resumed past the producer needs that
+            # producer's artifact on disk. Raise a clear error here rather than letting
+            # a bare `assert ... is not None` fire deep in the phase loop with no context.
             if initial_state in ("coding", "code_review", "test_design", "test_execution", "commit"):
                 arch_data = self._load_artifact_output("architecture_doc")
-                if arch_data is not None:
-                    arch_doc = ArchitectureDoc(**arch_data)
+                if arch_data is None:
+                    raise RuntimeError(
+                        f"Cannot resume at {initial_state}: architecture_doc artifact not found"
+                    )
+                arch_doc = ArchitectureDoc(**arch_data)
 
             # "commit" re-entry skips the phase loop (mapped to "done" below) but still
             # needs code_art + test_suite for run_commit's closing asserts and the CLI's
@@ -1688,12 +1694,18 @@ class StateMachine:
             # it the subsequent test_execution asserts immediately with a blank error.
             if initial_state in ("test_design", "test_execution", "commit"):
                 code_data = self._load_artifact_output("code_artifact")
-                if code_data is not None:
-                    code_art = CodeArtifact(**code_data)
+                if code_data is None:
+                    raise RuntimeError(
+                        f"Cannot resume at {initial_state}: code_artifact artifact not found"
+                    )
+                code_art = CodeArtifact(**code_data)
             if initial_state in ("test_execution", "commit"):
                 suite_data = self._load_artifact_output("test_suite")
-                if suite_data is not None:
-                    test_suite = TestSuite(**suite_data)
+                if suite_data is None:
+                    raise RuntimeError(
+                        f"Cannot resume at {initial_state}: test_suite artifact not found"
+                    )
+                test_suite = TestSuite(**suite_data)
 
             # Map reentry_state names to the while-loop state labels
             _state_map = {
@@ -1986,6 +1998,10 @@ class StateMachine:
     # ------------------------------------------------------------------
 
     def mark_failed_terminal(self) -> None:
+        # Safe to call from an error handler before a run was started (e.g. an exception
+        # during start_run/resume_run): no run means nothing to mark.
+        if self._run is None:
+            return
         self.run.status = "failed_terminal"
         self._save_run_state()
 

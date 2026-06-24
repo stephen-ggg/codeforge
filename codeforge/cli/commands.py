@@ -139,9 +139,18 @@ def _select_resume_escalation(
 
 
 def _initial_state_from(escalation: "EscalationEvent | None") -> str:
-    """Reentry state for resume: the escalation's reentry_directive, else requirements."""
+    """Reentry state for resume.
+
+    Priority: the resolution's reentry_directive, else the escalation's
+    suggested_reentry_state (the phase that was running when it fired), else
+    requirements. Falling back to the suggested phase avoids a full pipeline restart
+    (re-prompting the human, regenerating existing artifacts) for an escalation that
+    was resolved without an explicit directive.
+    """
     if escalation and escalation.resolution and escalation.resolution.reentry_directive:
         return escalation.resolution.reentry_directive.reentry_state
+    if escalation and escalation.suggested_reentry_state:
+        return escalation.suggested_reentry_state
     return "requirements"
 
 
@@ -474,9 +483,11 @@ def run(
         raise typer.Exit(1)
 
     run_log_dir = _run_log_dir(project_dir)
-    sm = StateMachine(config, project_dir, run_log_dir)
+    # Constructed inside the try so a constructor failure still releases the lock.
+    sm: StateMachine | None = None
 
     try:
+        sm = StateMachine(config, project_dir, run_log_dir)
         codeforge_run = sm.start_run(run_mode.value, resolved_brief)
         _save_brief(run_log_dir, codeforge_run.run_id, resolved_brief)
         typer.echo(f"Run started: {codeforge_run.run_id}")
@@ -487,7 +498,7 @@ def run(
         _do_commit(sm, req_doc, code_art, test_suite, config, project_dir)
 
     except EscalationError as exc:
-        run_id = sm.run.run_id if sm._run else "unknown"
+        run_id = sm.run.run_id if sm is not None and sm._run else "unknown"
         typer.echo(f"\nCodeforge escalated: {exc.reason}", err=True)
         if exc.phase:
             typer.echo(f"Phase: {exc.phase}", err=True)
@@ -499,7 +510,8 @@ def run(
         raise typer.Exit(2)
 
     except Exception as exc:
-        sm.mark_failed_terminal()
+        if sm is not None:
+            sm.mark_failed_terminal()
         typer.echo(f"Codeforge failed with unexpected error: {exc}", err=True)
         raise typer.Exit(1)
 
@@ -582,9 +594,12 @@ def resume(
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 
-    sm = StateMachine(config, project_dir, run_log_dir)
+    # Constructed inside the try so a constructor (or CodeforgeRun parse) failure still
+    # releases the lock and is handled by the terminal-failure path below.
+    sm: StateMachine | None = None
 
     try:
+        sm = StateMachine(config, project_dir, run_log_dir)
         codeforge_run = CodeforgeRun(**run_data)
 
         # Nothing to resume on a completed run.
@@ -667,7 +682,13 @@ def resume(
         # at the same reentry state. counter_resets reset to 0 (idempotent); a
         # reset_global_ceiling re-zeroes agent_call_count, which is acceptable
         # because this path only runs when a prior resume did not complete.
+        # Default reentry: the phase that was running when the escalation fired
+        # (suggested_reentry_state). Only when there is no escalation at all — a run
+        # that failed without escalating, so no reentry info exists — do we fall back
+        # to a full restart from requirements. A directive (below) overrides this.
         initial_state = "requirements"
+        if escalation is not None and escalation.suggested_reentry_state:
+            initial_state = escalation.suggested_reentry_state
         if escalation and escalation.resolution and escalation.resolution.reentry_directive:
             directive = escalation.resolution.reentry_directive
             initial_state = directive.reentry_state
@@ -730,7 +751,8 @@ def resume(
         raise typer.Exit(2)
 
     except Exception as exc:
-        sm.mark_failed_terminal()
+        if sm is not None:
+            sm.mark_failed_terminal()
         typer.echo(f"Codeforge failed: {exc}", err=True)
         raise typer.Exit(1)
 

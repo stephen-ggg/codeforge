@@ -198,6 +198,40 @@ def test_resume_run_handles_absent_pending_writes(
     assert sm.pending.get("architecture") is None
 
 
+def test_resume_missing_required_artifact_raises_clear_error(
+    sm: StateMachine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding #4: a resume that needs an artifact the store doesn't have fails
+    with a clear RuntimeError, not a bare AssertionError deep in the phase loop."""
+    req = {
+        "run_id": "r",
+        "run_mode": "new_project",
+        "feature_title": "F",
+        "feature_description": "D",
+        "scope": {"in_scope": [], "explicitly_out_of_scope": []},
+        "acceptance_criteria": [],
+        "data_contracts": [],
+        "human_confirmed_decisions": [],
+    }
+    monkeypatch.setattr(StateMachine, "_load_prompts", lambda self: {})
+    monkeypatch.setattr(
+        StateMachine,
+        "_load_artifact_output",
+        lambda self, atype: req if atype == "requirements_doc" else None,
+    )
+    with pytest.raises(RuntimeError, match="architecture_doc"):
+        sm.execute("brief", None, initial_state="coding")
+
+
+def test_mark_failed_terminal_noop_without_run(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    """Review finding #5: mark_failed_terminal must be safe to call from an error
+    handler before a run was started (e.g. an exception during start_run)."""
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.mark_failed_terminal()  # _run is None — must not raise
+
+
 def test_start_run_initialises_components(sm: StateMachine) -> None:
     assert sm.run is not None
     assert sm.pending is not None
