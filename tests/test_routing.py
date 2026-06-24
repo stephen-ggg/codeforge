@@ -143,6 +143,15 @@ def test_code_bug_retry_resets_reprompt_cushions() -> None:
     # budgets are restored too.
     assert "code_review_loop" in out.counter_resets
     assert "security_review_loop" in out.counter_resets
+    # ...and the per-invocation low-confidence cushions of every agent the re-run
+    # re-invokes (coder → reviewers → test_designer → test_analyst), so an agent that
+    # spent its one nudge in a prior cycle isn't denied it on the fresh invocation.
+    assert "code_reviewer_low_confidence_reprompt" in out.counter_resets
+    assert "security_reviewer_low_confidence_reprompt" in out.counter_resets
+    assert "test_designer_low_confidence_reprompt" in out.counter_resets
+    assert "test_analyst_low_confidence_reprompt" in out.counter_resets
+    # ...but NOT architecture: code_bug re-enters at coding, not architecture.
+    assert "architecture_designer_low_confidence_reprompt" not in out.counter_resets
 
 
 def test_spec_gap_retry_resets_reprompt_cushions_and_review_loops() -> None:

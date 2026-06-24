@@ -66,11 +66,19 @@ class CodeforgeLock:
         self._fd = fd
 
     def release(self) -> None:
-        """Release the lock and remove the LOCK file. Safe to call if never acquired."""
+        """Release the lock. Safe to call if never acquired.
+
+        Deliberately does NOT unlink the LOCK file. flock — not the file's
+        existence — is the exclusion mechanism, and a leftover file is harmless
+        (the next run flocks the same inode). Unlinking would reopen the classic
+        flock-on-unlinked-inode race: between another run re-acquiring the lock on
+        this inode and our unlink, we would delete the path out from under it, and
+        a third run's O_CREAT would mint a fresh inode and flock it successfully —
+        two holders at once. Leaving the file in place keeps exclusion correct.
+        """
         if self._fd is not None:
             try:
                 fcntl.flock(self._fd, fcntl.LOCK_UN)
             finally:
                 os.close(self._fd)
                 self._fd = None
-        self._lock_path.unlink(missing_ok=True)

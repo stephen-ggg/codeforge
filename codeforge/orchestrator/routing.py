@@ -510,11 +510,19 @@ def route_test_analysis_code_bug(
             decision="retry_same_agent",
             next_state="coding",
             counter_deltas={"test_loop": 1},
-            # Re-enters coding, which re-runs the full coder → code_review →
-            # security_review pipeline. Restore the coder's per-invocation re-prompt
-            # cushion AND the review-loop budgets that the re-run will consume again.
+            # Re-enters at coding, which re-runs the full coder → code_review →
+            # security_review → test_design → test_execution → test_analysis pipeline.
+            # Restore the review-loop budgets AND every downstream agent's per-invocation
+            # re-prompt cushion that the re-run will consume again (mirrors spec_gap, minus
+            # architecture, which this path does not re-enter). Omitting the reviewer/test
+            # cushions let an agent that spent its one nudge in a prior cycle escalate on
+            # low confidence with no re-prompt on the fresh invocation.
             counter_resets=[
                 "coder_low_confidence_reprompt",
+                "code_reviewer_low_confidence_reprompt",
+                "security_reviewer_low_confidence_reprompt",
+                "test_designer_low_confidence_reprompt",
+                "test_analyst_low_confidence_reprompt",
                 "code_review_loop",
                 "security_review_loop",
                 "malformed_output",
