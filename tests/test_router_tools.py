@@ -9,8 +9,10 @@ returns a single RouterResult).
 """
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
+import litellm
 import pytest
 
 from codeforge.config.config_loader import ConfigSnapshot
@@ -58,7 +60,7 @@ def test_tool_loop_runs_then_returns_final_json(monkeypatch, minimal_config: Con
         seen_kwargs.append(kwargs)
         return responses.pop(0)
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
 
     executor = FakeExecutor()
     router = ModelRouter(minimal_config)
@@ -114,7 +116,7 @@ def test_streaming_agent_accumulates_chunks(monkeypatch, minimal_config: ConfigS
         assert kwargs.get("stream") is True
         return iter(chunks)
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
 
     router = ModelRouter(minimal_config)
     result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
@@ -134,7 +136,7 @@ def test_streaming_marks_truncated_on_length(monkeypatch, minimal_config: Config
         _chunk(finish_reason="length", call_id="resp-trunc"),
     ]
 
-    monkeypatch.setattr(router_mod.litellm, "completion", lambda **kw: iter(chunks))
+    monkeypatch.setattr(litellm, "completion", lambda **kw: iter(chunks))
 
     router = ModelRouter(minimal_config)
     result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
@@ -150,7 +152,7 @@ def test_streaming_missing_finish_reason_marks_truncated(monkeypatch, minimal_co
         _chunk(content='{"output": {"ok": true}, "confidence": 0.9}'),
         _chunk(finish_reason=None, call_id="resp-cut"),
     ]
-    monkeypatch.setattr(router_mod.litellm, "completion", lambda **kw: iter(chunks))
+    monkeypatch.setattr(litellm, "completion", lambda **kw: iter(chunks))
 
     router = ModelRouter(minimal_config)
     result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
@@ -174,7 +176,7 @@ def test_streaming_truncated_does_not_salvage_quoted_envelope(
         _chunk(content='{"output": {"real": tru'),   # cut off mid-token
         _chunk(finish_reason="length", call_id="resp-trunc2"),
     ]
-    monkeypatch.setattr(router_mod.litellm, "completion", lambda **kw: iter(chunks))
+    monkeypatch.setattr(litellm, "completion", lambda **kw: iter(chunks))
 
     router = ModelRouter(minimal_config)
     result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
@@ -195,7 +197,7 @@ def test_streaming_skipped_when_tools_present(monkeypatch, minimal_config: Confi
         assert "stream" not in kwargs
         return _response(_msg('{"output": {}, "confidence": 1.0}'), "no-stream")
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
 
     executor = FakeExecutor()
     router = ModelRouter(minimal_config)
@@ -224,7 +226,7 @@ def test_no_tools_path_is_single_shot(monkeypatch, minimal_config: ConfigSnapsho
             ])
         return _response(_msg('{"output": {}, "confidence": 1.0}'), "solo")
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
 
     router = ModelRouter(minimal_config)
     result = router.complete(agent_id="coder", system_prompt="s", user_turn="u", run_id="r")
@@ -271,8 +273,8 @@ def test_backoff_retries_transient_then_succeeds(monkeypatch, minimal_config: Co
             )
         return _response(_msg('{"output": {}, "confidence": 0.9}'), "ok")
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
 
     router = ModelRouter(minimal_config)
     result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
@@ -294,8 +296,8 @@ def test_non_transient_error_skips_backoff(monkeypatch, minimal_config: ConfigSn
             message="invalid key", llm_provider="anthropic", model="claude-sonnet-4-6",
         )
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
 
     router = ModelRouter(minimal_config)
     with pytest.raises(RouterError):
@@ -317,8 +319,8 @@ def test_rate_limit_error_is_retried(monkeypatch, minimal_config: ConfigSnapshot
             )
         return _response(_msg('{"output": {}, "confidence": 0.9}'), "ok")
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
 
     router = ModelRouter(minimal_config)
     result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
@@ -340,8 +342,8 @@ def test_retry_after_header_honored(monkeypatch, minimal_config: ConfigSnapshot)
             )
         return _response(_msg('{"output": {}, "confidence": 0.9}'), "ok")
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
     monkeypatch.setattr(router_mod, "_retry_after", lambda exc: 30.0)
 
     router = ModelRouter(minimal_config)
@@ -365,8 +367,8 @@ def test_internal_server_error_is_retried(monkeypatch, minimal_config: ConfigSna
             )
         return _response(_msg('{"output": {}, "confidence": 0.9}'), "ok")
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
 
     router = ModelRouter(minimal_config)
     result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
@@ -394,8 +396,8 @@ def test_backoff_exhausted_falls_to_fallback_model(monkeypatch, minimal_config: 
             fallback_calls["n"] += 1
             return _response(_msg('{"output": {}, "confidence": 0.7}'), "fb-ok")
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
 
     router = ModelRouter(config)
     result = router.complete(agent_id="code_reviewer", system_prompt="s", user_turn="u", run_id="r")
@@ -418,8 +420,8 @@ def test_backoff_all_exhausted_raises_router_error(monkeypatch, minimal_config: 
             message="overloaded", llm_provider="anthropic", model=kwargs.get("model", ""),
         )
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
 
     router = ModelRouter(config)
     with pytest.raises(RouterError):
@@ -450,8 +452,8 @@ def test_tool_loop_backoff_per_individual_call(monkeypatch, minimal_config: Conf
             )
         return _response(_msg('{"output": {}, "confidence": 0.9}'), "t2")
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
 
     executor = FakeExecutor()
     router = ModelRouter(minimal_config)
@@ -489,8 +491,8 @@ def test_streaming_mid_iteration_error_not_retried(monkeypatch, minimal_config: 
         call_count["n"] += 1
         return bad_stream()
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
 
     router = ModelRouter(minimal_config)
     with pytest.raises(RouterError):
@@ -524,8 +526,8 @@ def test_tool_loop_retry_exhaustion_falls_to_forced_final(monkeypatch, minimal_c
         forced_final_messages.extend(kwargs["messages"])
         return _response(_msg('{"output": {}, "confidence": 0.9}'), "final")
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
 
     executor = FakeExecutor()
     router = ModelRouter(minimal_config)
@@ -685,8 +687,8 @@ def test_streaming_transient_error_retried(monkeypatch, minimal_config: ConfigSn
             )
         return iter(chunks)
 
-    monkeypatch.setattr(router_mod.litellm, "completion", fake_completion)
-    monkeypatch.setattr(router_mod.time, "sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    monkeypatch.setattr(time, "sleep", lambda s: sleep_calls.append(s))
 
     router = ModelRouter(minimal_config)
     result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")

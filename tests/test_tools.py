@@ -11,11 +11,12 @@ AccessEvent — for allowed and denied calls alike.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from codeforge.firewall.manifest import load_manifest
-from codeforge.schemas.contracts import AccessEvent, CountersSnapshot
+from codeforge.schemas.contracts import AccessEvent, CountersSnapshot, LogActor
 from codeforge.tools.executor import TOOL_SCHEMAS, ToolExecutor
 from codeforge.tools.jail import JailError, resolve_safe
 from codeforge.tools.readonly import list_dir, read_file, search_code
@@ -118,11 +119,36 @@ def test_list_dir_hides_env_file(repo: Path) -> None:
 
 class FakeEventLog:
     def __init__(self) -> None:
-        self.tool_calls: list[dict] = []
+        self.tool_calls: list[dict[str, Any]] = []
         self.access_events: list[AccessEvent] = []
 
-    def emit_tool_call(self, **kwargs) -> None:  # noqa: ANN003
-        self.tool_calls.append(kwargs)
+    # Signature mirrors the executor's _EventSink protocol so the fake actually
+    # conforms (and breaks loudly if the real surface changes).
+    def emit_tool_call(
+        self,
+        agent_id: LogActor,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        decision: str,
+        result_summary: str,
+        latency_ms: float,
+        counters: CountersSnapshot,
+        deny_reason: str | None = None,
+        litellm_call_id: str | None = None,
+    ) -> None:
+        self.tool_calls.append(
+            {
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+                "decision": decision,
+                "result_summary": result_summary,
+                "latency_ms": latency_ms,
+                "counters": counters,
+                "deny_reason": deny_reason,
+                "litellm_call_id": litellm_call_id,
+            }
+        )
 
     def emit_access_event(self, event: AccessEvent) -> None:
         self.access_events.append(event)

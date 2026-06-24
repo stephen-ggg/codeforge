@@ -467,7 +467,9 @@ def run(
             typer.echo(f"Error: brief file is empty: {brief_file}", err=True)
             raise typer.Exit(1)
     else:
-        resolved_brief = brief.strip()  # type: ignore[assignment]
+        # brief_file is None here, so the earlier guard guarantees brief is set.
+        assert brief is not None
+        resolved_brief = brief.strip()
         if not resolved_brief:
             typer.echo("Error: --brief value is empty.", err=True)
             raise typer.Exit(1)

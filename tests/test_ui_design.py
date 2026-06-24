@@ -24,6 +24,7 @@ from codeforge.firewall.assembler import ContextAssembler
 from codeforge.firewall.manifest import load_manifest
 from codeforge.orchestrator.pending_writes import PendingWrites
 from codeforge.schemas.contracts import (
+    AgentId,
     ComponentSpec,
     DesignToken,
     PhaseColor,
@@ -235,7 +236,7 @@ def _make_assembler_with_ui_design(
     "code_reviewer",
 ])
 def test_ui_design_included_for_allowed_agents(
-    agent_id: str, tmp_path: Path
+    agent_id: AgentId, tmp_path: Path
 ) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -254,7 +255,7 @@ def test_ui_design_included_for_allowed_agents(
     "test_analyst",
 ])
 def test_ui_design_excluded_for_disallowed_agents(
-    agent_id: str, tmp_path: Path
+    agent_id: AgentId, tmp_path: Path
 ) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
