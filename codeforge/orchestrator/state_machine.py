@@ -20,7 +20,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, NoReturn, cast
+from typing import Any, Callable, NoReturn, TypeVar, cast
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,9 @@ from codeforge.schemas.contracts import (
 from codeforge.schemas.validation import OutputValidator
 from codeforge.store.artifact_store import ArtifactStore
 from codeforge.store.project_state import ProjectStateStore
+
+
+_ArtifactModel = TypeVar("_ArtifactModel")
 
 
 def _now() -> str:
@@ -358,17 +361,26 @@ class StateMachine:
             "resumed_at": _now(),
             "changes": changes,
         })
+        self.record_human_override("config_change_on_resume", json.dumps(changes))
+        self.run.config_snapshot = self._config.to_dict()
+        self._save_run_state()
+
+    def record_human_override(self, decision: str, rationale: str | None) -> None:
+        """Stage a human_override entry into decisions_log (flushed at commit).
+
+        Single builder for the decisions_log human_override shape, shared by the
+        config-change-on-resume path here and the operator-resolution path in the CLI,
+        so the entry schema and timestamp source can't drift between the two.
+        """
         self.pending.merge_append("decisions_log", [{
             "entry_id": str(uuid.uuid4()),
             "run_id": self.run.run_id,
             "entry_type": "human_override",
             "source_agent": None,
-            "decision": "config_change_on_resume",
-            "rationale": json.dumps(changes),
+            "decision": decision,
+            "rationale": rationale,
             "created_at": _now(),
         }])
-        self.run.config_snapshot = self._config.to_dict()
-        self._save_run_state()
 
     # ------------------------------------------------------------------
     # Properties (convenience accessors with assertion)
@@ -1619,6 +1631,26 @@ class StateMachine:
             prompts[aid] = p.read_text(encoding="utf-8")
         return prompts
 
+    def _require_resume_artifact(
+        self,
+        initial_state: str,
+        artifact_type: str,
+        model: Callable[..., _ArtifactModel],
+    ) -> _ArtifactModel:
+        """Load a producer artifact a resumed phase depends on, or raise a clear error.
+
+        A phase resumed past its producer needs that producer's artifact on disk. Raise
+        a contextual RuntimeError here rather than letting a bare `assert ... is not None`
+        fire deep in the phase loop with no context. The caller owns the gating set (which
+        initial_states require which artifact); this only does load-or-raise-or-parse.
+        """
+        data = self._load_artifact_output(artifact_type)
+        if data is None:
+            raise RuntimeError(
+                f"Cannot resume at {initial_state}: {artifact_type} artifact not found"
+            )
+        return model(**data)
+
     def _load_artifact_output(self, artifact_type: str) -> dict[str, Any] | None:
         """
         Load the latest artifact of the given type from the artifact store.
@@ -1680,12 +1712,9 @@ class StateMachine:
             # producer's artifact on disk. Raise a clear error here rather than letting
             # a bare `assert ... is not None` fire deep in the phase loop with no context.
             if initial_state in ("coding", "code_review", "test_design", "test_execution", "commit"):
-                arch_data = self._load_artifact_output("architecture_doc")
-                if arch_data is None:
-                    raise RuntimeError(
-                        f"Cannot resume at {initial_state}: architecture_doc artifact not found"
-                    )
-                arch_doc = ArchitectureDoc(**arch_data)
+                arch_doc = self._require_resume_artifact(
+                    initial_state, "architecture_doc", ArchitectureDoc
+                )
 
             # "commit" re-entry skips the phase loop (mapped to "done" below) but still
             # needs code_art + test_suite for run_commit's closing asserts and the CLI's
@@ -1694,19 +1723,13 @@ class StateMachine:
             # resume so _run_impl_with_reviews never runs, leaving code_art=None. Without
             # it the subsequent test_execution asserts immediately with a blank error.
             if initial_state in ("test_design", "test_execution", "commit"):
-                code_data = self._load_artifact_output("code_artifact")
-                if code_data is None:
-                    raise RuntimeError(
-                        f"Cannot resume at {initial_state}: code_artifact artifact not found"
-                    )
-                code_art = CodeArtifact(**code_data)
+                code_art = self._require_resume_artifact(
+                    initial_state, "code_artifact", CodeArtifact
+                )
             if initial_state in ("test_execution", "commit"):
-                suite_data = self._load_artifact_output("test_suite")
-                if suite_data is None:
-                    raise RuntimeError(
-                        f"Cannot resume at {initial_state}: test_suite artifact not found"
-                    )
-                test_suite = TestSuite(**suite_data)
+                test_suite = self._require_resume_artifact(
+                    initial_state, "test_suite", TestSuite
+                )
 
             # Map reentry_state names to the while-loop state labels
             _state_map = {

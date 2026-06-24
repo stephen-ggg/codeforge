@@ -478,6 +478,25 @@ def test_security_checklist_incomplete_fails(gates: GateEvaluator) -> None:
     assert result.violation_reprompt.rule == "security_checklist_complete"
 
 
+def test_security_checklist_duplicate_categories_fail(gates: GateEvaluator) -> None:
+    # Ten assessed entries but all the same category (modulo whitespace/case) must NOT
+    # satisfy the gate — completeness means ten DISTINCT categories, not ten rows.
+    raw = json.dumps({
+        "output": {
+            "verdict": "pass", "summary": "s", "findings": [],
+            "checklist": [
+                {"category": "  Injection  " if i % 2 else "injection",
+                 "assessed": True, "result": "clean", "notes": "n"}
+                for i in range(10)
+            ],
+        },
+        "assumptions_made": [], "confidence": 0.99, "unresolved_flags": [],
+    })
+    result = _evaluate(gates, raw)
+    assert result.contract_passed is False
+    assert result.violation_reprompt.rule == "security_checklist_complete"
+
+
 # ---------------------------------------------------------------------------
 # coverage_update_present — pass verdict must record coverage
 # ---------------------------------------------------------------------------

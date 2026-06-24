@@ -665,33 +665,23 @@ def resume(
             and escalation.resolution
             and escalation.resolution.outcome == "modified"
         ):
-            import uuid as _uuid
-            from datetime import datetime, timezone
-            sm.pending.merge_append("decisions_log", [{
-                "entry_id": str(_uuid.uuid4()),
-                "run_id": run_id,
-                "entry_type": "human_override",
-                "source_agent": None,
-                "decision": escalation.resolution.change_summary or "",
-                "rationale": escalation.resolution.human_notes,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }])
+            sm.record_human_override(
+                escalation.resolution.change_summary or "",
+                escalation.resolution.human_notes,
+            )
 
         # Apply the resolution's reentry directive (if any). This runs for both a
         # freshly-resolved and a previously-resolved escalation so re-resumes land
         # at the same reentry state. counter_resets reset to 0 (idempotent); a
         # reset_global_ceiling re-zeroes agent_call_count, which is acceptable
         # because this path only runs when a prior resume did not complete.
-        # Default reentry: the phase that was running when the escalation fired
-        # (suggested_reentry_state). Only when there is no escalation at all — a run
-        # that failed without escalating, so no reentry info exists — do we fall back
-        # to a full restart from requirements. A directive (below) overrides this.
-        initial_state = "requirements"
-        if escalation is not None and escalation.suggested_reentry_state:
-            initial_state = escalation.suggested_reentry_state
+        # Reentry precedence (directive → suggested_reentry_state → requirements) lives in
+        # _initial_state_from, shared with the echo at the top of this function so the
+        # message and the actual reentry can't diverge. When a directive is present we
+        # additionally apply its counter resets / ceiling reset below.
+        initial_state = _initial_state_from(escalation)
         if escalation and escalation.resolution and escalation.resolution.reentry_directive:
             directive = escalation.resolution.reentry_directive
-            initial_state = directive.reentry_state
             from codeforge.orchestrator.routing import RoutingOutcome as _RO
             reset_outcome = _RO(
                 row_id="X-resume",

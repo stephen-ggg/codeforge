@@ -223,14 +223,24 @@ class OutputValidator:
             # security_checklist_complete: the checklist must assess all ten categories
             # every run (the prompt mandates this). A short or partly-unassessed checklist
             # means the review skipped categories — enforce completeness, not just findings.
-            assessed = [c for c in payload.checklist if c.assessed]
-            if len(assessed) < _SECURITY_CHECKLIST_CATEGORY_COUNT:
+            # Count DISTINCT assessed categories (normalised): the category field is a
+            # free-form natural-language phrase, so exact-name matching against the prompt's
+            # ten descriptive labels would brittly re-prompt on harmless rephrasing. Counting
+            # distinct entries still closes the gaming hole the raw count left open — ten
+            # duplicates of one category ("injection" ×10) no longer satisfy the gate.
+            distinct_assessed = {
+                " ".join(c.category.lower().split())
+                for c in payload.checklist
+                if c.assessed and c.category.strip()
+            }
+            if len(distinct_assessed) < _SECURITY_CHECKLIST_CATEGORY_COUNT:
                 return False, self._make_violation(
                     rule="security_checklist_complete",
                     detail=(
                         f"security checklist must assess all "
-                        f"{_SECURITY_CHECKLIST_CATEGORY_COUNT} categories with assessed=true; "
-                        f"got {len(assessed)} assessed of {len(payload.checklist)} entries"
+                        f"{_SECURITY_CHECKLIST_CATEGORY_COUNT} distinct categories with "
+                        f"assessed=true; got {len(distinct_assessed)} distinct assessed of "
+                        f"{len(payload.checklist)} entries"
                     ),
                     missing_checklist_categories=[
                         c.category for c in payload.checklist if not c.assessed
