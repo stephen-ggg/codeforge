@@ -259,7 +259,7 @@ class StateMachine:
             source_root=Path(repos.source_code.path) if repos and repos.source_code.path else None,
         )
 
-        self._event_log.update_run_snapshot(self._run)
+        self._save_run_state()
         return self._run
 
     def resume_run(self, run: CodeforgeRun) -> None:
@@ -273,6 +273,11 @@ class StateMachine:
         run_log_dir = self._run_log_dir / run.run_id
         self._artifact_store = ArtifactStore(run_log_dir)
         self._pending = PendingWrites(self._project_state)
+        # Rehydrate the writes the prior session staged (persisted onto run.pending_writes
+        # by _save_run_state) so the resumed run flushes the complete project state at
+        # commit. Without this the phases that staged them are skipped on resume and the
+        # writes are lost (review finding #2).
+        self._pending.restore(run.pending_writes or {})
         self._event_log = EventLog(run_log_dir, run.run_id, self._config.name)
         self._validator = OutputValidator(self._config.to_dict())
         self._gates = GateEvaluator(self._validator, self._event_log, self._config.to_dict())
@@ -363,7 +368,7 @@ class StateMachine:
             "created_at": _now(),
         }])
         self.run.config_snapshot = self._config.to_dict()
-        self.event_log.update_run_snapshot(self.run)
+        self._save_run_state()
 
     # ------------------------------------------------------------------
     # Properties (convenience accessors with assertion)
@@ -434,6 +439,20 @@ class StateMachine:
         fragment = self._config.stack_profile.prompt_fragment(fragment_key)
         pkg.state_documents["_stack_guidance"] = fragment or ""
 
+    def _save_run_state(self) -> None:
+        """Persist the run snapshot to codeforge_run.json, first syncing the staged
+        pending-writes map onto the run.
+
+        The staging map lives in self._pending (in-memory); mirroring it onto
+        run.pending_writes before each snapshot makes it durable in run-logs (never
+        project-state/, so the commit-atomicity invariant holds) so an interrupted run
+        can rehydrate it on resume (see resume_run) and flush the complete project
+        state at commit. Also gives crash durability for free.
+        """
+        if self._pending is not None and self._run is not None:
+            self._run.pending_writes = self._pending.get_all_changed()
+        self.event_log.update_run_snapshot(self.run)
+
     def _apply_outcome(self, outcome: RoutingOutcome) -> None:
         """Apply counter deltas and resets from a routing outcome."""
         new_counters = apply_outcome(self.run.retry_counters, outcome)
@@ -448,7 +467,7 @@ class StateMachine:
             counter_resets=outcome.counter_resets,
             detail=outcome.detail,
         )
-        self.event_log.update_run_snapshot(self.run)
+        self._save_run_state()
 
     def _escalate(self, reason: EscalationReason, context: str = "") -> NoReturn:
         """Record escalation, update run status, raise EscalationError."""
@@ -462,7 +481,7 @@ class StateMachine:
         )
         self.run.escalations.append(event)
         self.run.status = "failed_escalated"
-        self.event_log.update_run_snapshot(self.run)
+        self._save_run_state()
         raise EscalationError(reason, context, phase=self._current_phase)
 
     # ------------------------------------------------------------------
@@ -1569,7 +1588,7 @@ class StateMachine:
         # (_do_commit) actually lands. Marking success here would be premature: a
         # commit failure must leave the run as failed_escalated and resumable, not
         # falsely "succeeded".
-        self.event_log.update_run_snapshot(self.run)
+        self._save_run_state()
 
     # ------------------------------------------------------------------
     # Top-level orchestration
@@ -1968,7 +1987,7 @@ class StateMachine:
 
     def mark_failed_terminal(self) -> None:
         self.run.status = "failed_terminal"
-        self.event_log.update_run_snapshot(self.run)
+        self._save_run_state()
 
 
 # ---------------------------------------------------------------------------

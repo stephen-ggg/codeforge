@@ -54,6 +54,15 @@ class PendingWrites:
         """Return a copy of all staged documents. Used by Phase 6 flush."""
         return copy.deepcopy(self._map)
 
+    def restore(self, data: dict[str, dict[str, Any]]) -> None:
+        """Replace the staging map with a previously captured snapshot.
+
+        Used on resume to rehydrate the writes a prior session staged (and that were
+        persisted to codeforge_run.json) so an interrupted run can flush the complete
+        project state at commit. Mirrors the shape returned by get_all_changed().
+        """
+        self._map = copy.deepcopy(data)
+
     def has(self, document: ProjectStateDocument) -> bool:
         """Return True if document has a pending write this run."""
         return document in self._map

@@ -372,6 +372,46 @@ def test_stage_ui_design_update_graceful_when_not_seeded(tmp_path: Path) -> None
     assert pending.get("ui_design") is None
 
 
+def test_stage_ui_design_update_works_after_resume(
+    minimal_config: Any, project_dir: Path, run_log_dir: Path
+) -> None:
+    """Review finding #2 regression: requirements_history staged in a prior session is
+    rehydrated on resume, so _stage_ui_design_update marks components built instead of
+    being a silent no-op (its pending.get("requirements_history") used to return None)."""
+    from codeforge.orchestrator.state_machine import StateMachine
+    from codeforge.schemas.contracts import CodeforgeRun, RetryCounters
+
+    store = ProjectStateStore(project_dir)
+    store.write("ui_design", _minimal_ui_state().model_dump())
+
+    run = CodeforgeRun(
+        run_id="run-ui-resume",
+        codeforge_version="codeforge-v1",
+        run_mode="new_project",
+        started_at="2026-06-15T00:00:00+00:00",
+        status="failed_escalated",  # type: ignore[arg-type]
+        config_snapshot=minimal_config.to_dict(),
+        retry_counters=RetryCounters(),
+        pending_writes={
+            "requirements_history": {
+                "feature_title": "X",
+                "ui_design_component_ids": ["PhaseRail"],
+            }
+        },
+    )
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    sm._stage_ui_design_update()
+
+    staged = sm.pending.get("ui_design")
+    assert staged is not None  # previously None on resume → update was skipped
+    result = UIDesignState(**staged)
+    phase_rail = next(c for c in result.components if c.id == "PhaseRail")
+    assert phase_rail.status == "built"
+    header = next(c for c in result.components if c.id == "Header")
+    assert header.status == "not_started"
+
+
 # ---------------------------------------------------------------------------
 # Seed parser
 # ---------------------------------------------------------------------------

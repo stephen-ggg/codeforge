@@ -148,6 +148,56 @@ def test_reconcile_drift_recorded_with_interactive_confirm(
         )
 
 
+def test_escalate_persists_pending_writes(sm: StateMachine, run_log_dir: Path) -> None:
+    """Review finding #2: staged project-state writes must be persisted onto the run
+    snapshot so a resumed run can flush the complete project state at commit."""
+    sm.pending.set("architecture", {"schema_version": "1.0.0", "modules": []})
+    sm.pending.set(
+        "requirements_history",
+        {"feature_title": "X", "ui_design_component_ids": ["PhaseRail"]},
+    )
+    sm.pending.merge_append("decisions_log", [{"entry_id": "d1", "decision": "x"}])
+    sm._current_phase = "architecture"
+
+    with pytest.raises(EscalationError):
+        sm._escalate("max_retries_exceeded", "ctx")
+
+    data = json.loads(
+        (run_log_dir / sm.run.run_id / "codeforge_run.json").read_text()
+    )
+    pw = data["pending_writes"]
+    assert pw["architecture"] == {"schema_version": "1.0.0", "modules": []}
+    assert pw["requirements_history"]["ui_design_component_ids"] == ["PhaseRail"]
+    assert pw["decisions_log"]["entries"][0]["entry_id"] == "d1"
+
+
+def test_resume_run_rehydrates_pending_writes(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    run = _persisted_run(minimal_config.to_dict())
+    run.pending_writes = {
+        "architecture": {"schema_version": "1.0.0", "modules": []},
+        "requirements_history": {"feature_title": "X", "ui_design_component_ids": ["A"]},
+        "decisions_log": {"schema_version": "1.0.0", "entries": [{"entry_id": "d1"}]},
+    }
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    assert sm.pending.get("architecture") == {"schema_version": "1.0.0", "modules": []}
+    assert sm.pending.get("requirements_history")["ui_design_component_ids"] == ["A"]
+    assert sm.pending.get("decisions_log")["entries"][0]["entry_id"] == "d1"
+
+
+def test_resume_run_handles_absent_pending_writes(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    """A run persisted before this change (or with no staged writes) carries an empty
+    pending_writes map and must resume cleanly."""
+    run = _persisted_run(minimal_config.to_dict())
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    assert sm.pending.get("architecture") is None
+
+
 def test_start_run_initialises_components(sm: StateMachine) -> None:
     assert sm.run is not None
     assert sm.pending is not None

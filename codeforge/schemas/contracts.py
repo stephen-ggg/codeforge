@@ -954,7 +954,10 @@ class CodeforgeRun(BaseModel):
     retry_counters: RetryCounters
     agent_call_count: int = 0
 
-    # In-memory pending writes — not persisted mid-run
+    # Durable snapshot of the orchestrator's staged project-state writes, mirrored here
+    # by StateMachine._save_run_state before each run-snapshot write. Persisted to
+    # codeforge_run.json (never project-state/, preserving commit-atomicity) so an
+    # interrupted run can rehydrate its staging map on resume. {} until the first stage.
     pending_writes: dict[str, Any] = Field(default_factory=dict)
 
     artifacts: dict[str, ArtifactRef | None] = Field(default_factory=dict)
