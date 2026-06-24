@@ -15,7 +15,9 @@ import pytest
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.orchestrator.gates import GateResult
 from codeforge.orchestrator.routing import (
+    route_block_flag,
     route_low_confidence,
+    route_test_analysis_code_bug,
     route_test_analysis_recoverable_error,
 )
 from codeforge.orchestrator.state_machine import (
@@ -223,6 +225,20 @@ def test_resume_missing_required_artifact_raises_clear_error(
         sm.execute("brief", None, initial_state="coding")
 
 
+def test_resume_missing_requirements_artifact_raises_clear_error(
+    sm: StateMachine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The requirements_doc itself is the first required artifact on any non-requirements
+    re-entry. If the store doesn't have it, resume must fail with a clear RuntimeError
+    naming requirements_doc — not a bare AssertionError deep in the phase loop."""
+    monkeypatch.setattr(StateMachine, "_load_prompts", lambda self: {})
+    monkeypatch.setattr(
+        StateMachine, "_load_artifact_output", lambda self, atype: None
+    )
+    with pytest.raises(RuntimeError, match="requirements_doc"):
+        sm.execute("brief", None, initial_state="coding")
+
+
 def test_mark_failed_terminal_noop_without_run(
     minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
 ) -> None:
@@ -324,11 +340,16 @@ def test_block_flag_persists_links_and_enriches(sm: StateMachine, run_log_dir: P
     output = _block_output(summary)
     gr = _block_gate_result(output)
 
+    counters_before = sm.run.retry_counters.model_copy(deep=True)
+
     with pytest.raises(EscalationError) as exc:
         sm._handle_policy_escalation(
-            gr, "test_analyst", "test_analysis", route_low_confidence("test_analyst")
+            gr, "test_analyst", "test_analysis", route_block_flag()
         )
     assert exc.value.reason == "block_flag"
+
+    # "No retry" contract: a block flag halts immediately — no counter is touched.
+    assert sm.run.retry_counters == counters_before
 
     # Gate event is self-sufficient and linked to a real artifact id.
     gate = _gate_events(run_log_dir, sm.run.run_id)[-1]
@@ -737,3 +758,33 @@ def test_runtime_dep_error_recovers_to_coding_with_dep_context(sm: StateMachine)
     ctx = _build_dep_fix_context(runner_results)
     assert ctx["trigger"] == "runtime_dep_error"
     assert "leftpad" in ctx["stderr_tail"]
+
+
+def test_apply_outcome_zeroes_reset_counters_and_keeps_others(sm: StateMachine) -> None:
+    """The counter_resets on a test_analysis routing outcome must actually ZERO those
+    counters on the run when applied — not merely be present in the directive. A counter
+    not named in the resets (and not in the deltas) is left untouched."""
+    sm.run.retry_counters = RetryCounters(
+        coder_low_confidence_reprompt=1,
+        code_review_loop=2,
+        security_review_loop=1,
+        malformed_output=2,
+        truncation_retry=1,
+        infrastructure=3,   # NOT reset by code_bug — must survive
+        test_loop=0,
+    )
+
+    outcome = route_test_analysis_code_bug(sm.run.retry_counters, sm._config.to_dict())
+    sm._apply_outcome(outcome)
+
+    c = sm.run.retry_counters
+    # Everything named in counter_resets is now zero.
+    assert c.coder_low_confidence_reprompt == 0
+    assert c.code_review_loop == 0
+    assert c.security_review_loop == 0
+    assert c.malformed_output == 0
+    assert c.truncation_retry == 0
+    # The delta still applies (one test cycle consumed) …
+    assert c.test_loop == 1
+    # … and an unrelated counter is preserved.
+    assert c.infrastructure == 3

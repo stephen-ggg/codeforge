@@ -126,6 +126,99 @@ def test_d9_critical_severity_forces_fail_verdict(gates: GateEvaluator) -> None:
     assert result.parsed_output.output.verdict == "fail"
 
 
+def _review_finding(severity: str) -> dict[str, Any]:
+    return {
+        "id": "RF1", "file": "math.py", "line_range": [37, 41],
+        "category": "correctness", "severity": severity,
+        "description": "x", "suggested_fix": "y",
+    }
+
+
+def _code_review_envelope(severity: str, verdict: str = "pass") -> str:
+    return json.dumps({
+        "output": {
+            "verdict": verdict, "summary": "s",
+            "findings": [_review_finding(severity)],
+            "criteria_coverage": [],
+        },
+        "assumptions_made": [], "confidence": 0.99, "unresolved_flags": [],
+    })
+
+
+def _evaluate_code_reviewer(gates: GateEvaluator, raw: str) -> Any:
+    # No requirements_doc -> the review_criteria_coverage cross-doc check is skipped,
+    # isolating the D9 severity-force behaviour.
+    return gates.evaluate(
+        raw=raw, expected_model=CodeReviewerOutput, agent_id="code_reviewer",
+        attempt_number=0, assembly_id="a", counters=RetryCounters(), agent_call_count=1,
+    )
+
+
+def test_d9_error_severity_forces_fail_verdict_code_reviewer(gates: GateEvaluator) -> None:
+    """A code-review payload with an error-severity finding and verdict 'pass' is
+    forced to 'fail' by D9 (the code_reviewer branch of _apply_severity_force)."""
+    result = _evaluate_code_reviewer(gates, _code_review_envelope("error", verdict="pass"))
+    assert result.parsed_output is not None
+    assert result.parsed_output.output.verdict == "fail"
+
+
+def test_d9_warn_severity_does_not_force_fail_code_reviewer(gates: GateEvaluator) -> None:
+    """Negative case: a warn-severity finding must NOT force fail — the verdict the
+    reviewer chose stands. Guards against an over-eager force."""
+    result = _evaluate_code_reviewer(gates, _code_review_envelope("warn", verdict="pass"))
+    assert result.parsed_output is not None
+    assert result.parsed_output.output.verdict == "pass"
+
+
+def test_d9_warn_severity_does_not_force_fail_security_reviewer(gates: GateEvaluator) -> None:
+    """Negative case for the security reviewer: a non-critical (warn) finding leaves
+    the 'pass' verdict intact."""
+    finding = {
+        "id": "F1", "file": "math.py", "line_range": [37, 41],
+        "category": "input_validation", "severity": "warn",
+        "description": "x", "recommended_fix": "y",
+    }
+    result = _evaluate(gates, _security_envelope(finding, verdict="pass"))
+    assert result.parsed_output is not None
+    assert result.parsed_output.output.verdict == "pass"
+
+
+# ---------------------------------------------------------------------------
+# block_flag detection — a severity=block unresolved flag halts at the policy gate
+# ---------------------------------------------------------------------------
+
+def _security_envelope_with_flag(severity: str) -> str:
+    return json.dumps({
+        "output": {
+            "verdict": "pass", "summary": "test", "findings": [],
+            "checklist": _full_checklist(),
+        },
+        "assumptions_made": [], "confidence": 0.99,
+        "unresolved_flags": [{
+            "id": "FLAG-001", "description": "blocking issue",
+            "severity": severity, "suggested_action": "fix it",
+        }],
+    })
+
+
+def test_block_flag_detected_by_policy_gate(gates: GateEvaluator) -> None:
+    """A severity=block unresolved flag drives the policy gate to fail with
+    escalation_reason=block_flag and rule block_flag_present — exercises the detection
+    path (validate_policy), which every state-machine test bypasses by hand-building
+    the GateResult."""
+    result = _evaluate(gates, _security_envelope_with_flag("block"))
+    assert result.policy_passed is False
+    assert result.escalation_reason == "block_flag"
+    assert result.policy_gate_rule == "block_flag_present"
+
+
+def test_warn_flag_does_not_trip_block_path(gates: GateEvaluator) -> None:
+    """A warn-severity flag is informational — it must NOT trigger the block halt."""
+    result = _evaluate(gates, _security_envelope_with_flag("warn"))
+    assert result.policy_passed is True
+    assert result.escalation_reason is None
+
+
 def _test_designer_envelope(path_a: str, path_b: str) -> str:
     def _case(cid: str, path: str) -> dict[str, Any]:
         return {
@@ -287,6 +380,41 @@ def test_dev_script_missing_key_fails(nextjs_gates: GateEvaluator) -> None:
 
 def test_dev_script_next_dev_with_flags_passes(nextjs_gates: GateEvaluator) -> None:
     result = _evaluate_coder(nextjs_gates, _coder_envelope("next dev --port 3000"))
+    assert result.contract_passed is True
+
+
+# ---------------------------------------------------------------------------
+# requirements_txt_present — the default (python) stack requires its manifest
+# ---------------------------------------------------------------------------
+
+def _coder_files_envelope(paths: list[str]) -> str:
+    files = [
+        {"path": p, "content": "x", "language": "text",
+         "change_type": "new", "change_reason": None}
+        for p in paths
+    ]
+    return json.dumps({
+        "output": {
+            "files": files,
+            "module_interfaces": {"files": []},
+            "change_summary": "s",
+            "criteria_addressed": [],
+            "interface_changes": [],
+        },
+        "assumptions_made": [], "confidence": 0.9, "unresolved_flags": [],
+    })
+
+
+def test_requirements_txt_missing_fails(gates: GateEvaluator) -> None:
+    """The default stack (manifest_required, requirements.txt) rejects a CodeArtifact
+    that omits the manifest at repo root."""
+    result = _evaluate_coder(gates, _coder_files_envelope(["app.py"]))
+    assert result.contract_passed is False
+    assert result.violation_reprompt.rule == "requirements_txt_present"
+
+
+def test_requirements_txt_present_passes(gates: GateEvaluator) -> None:
+    result = _evaluate_coder(gates, _coder_files_envelope(["app.py", "requirements.txt"]))
     assert result.contract_passed is True
 
 

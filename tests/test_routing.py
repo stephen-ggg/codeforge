@@ -9,6 +9,7 @@ re-prompt.
 from __future__ import annotations
 
 from codeforge.orchestrator.routing import (
+    route_block_flag,
     route_low_confidence_reprompt,
     route_test_analysis_code_bug,
     route_test_analysis_recoverable_error,
@@ -66,6 +67,21 @@ def test_unmapped_phase_returns_none() -> None:
     # transient/corrupt output and "no phase" are not auto-recoverable
     assert route_test_analysis_recoverable_error("results_parse_error", RetryCounters(), _CONFIG) is None
     assert route_test_analysis_recoverable_error(None, RetryCounters(), _CONFIG) is None
+
+
+# ----------------------------------------------------------------------
+# block flag — immediate, terminal halt with no retry budget consumed
+# ----------------------------------------------------------------------
+
+
+def test_route_block_flag_is_terminal_and_consumes_no_budget() -> None:
+    out = route_block_flag()
+    assert out.decision == "escalate"
+    assert out.next_state == "failed_escalated"
+    assert out.escalation_reason == "block_flag"
+    # The "no retry" contract: a block flag must not touch any retry counter.
+    assert out.counter_deltas == {}
+    assert out.counter_resets == []
 
 
 # ----------------------------------------------------------------------

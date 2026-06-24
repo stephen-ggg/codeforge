@@ -54,6 +54,15 @@ def test_jail_rejects_denied_locations(repo: Path, denied: str) -> None:
         resolve_safe(repo, denied)
 
 
+def test_jail_rejects_symlink_escape(repo: Path) -> None:
+    """resolve_safe() resolves symlinks (Path.resolve), so an in-repo symlink pointing
+    outside the root must be refused — otherwise a symlink would be a jail bypass.
+    The symlink targets /etc (definitively outside the repo root)."""
+    (repo / "escape").symlink_to("/etc")
+    with pytest.raises(JailError):
+        resolve_safe(repo, "escape/passwd")
+
+
 # --------------------------------------------------------------------------- #
 # Read-only functions
 # --------------------------------------------------------------------------- #
