@@ -70,6 +70,57 @@ def test_merge_append_prefers_pending_over_disk(tmp_path: Path) -> None:
     assert "STALE" not in ids
 
 
+def test_merge_append_dedups_retried_entry(tmp_path: Path) -> None:
+    """A retried step re-appends the same logical decision with a FRESH entry_id and
+    created_at (both regenerated per call). merge_append must dedup on stable content so
+    the decisions_log doesn't accumulate a duplicate on every reentry."""
+    store = _store(tmp_path)
+    pending = PendingWrites(store)
+
+    def decision_entry(entry_id: str, ts: str) -> dict:
+        return {
+            "entry_id": entry_id,            # volatile: new uuid each attempt
+            "run_id": "r1",
+            "entry_type": "agent_decision",
+            "source_agent": "coder",
+            "decision": "use sqlite",
+            "rationale": "small footprint",
+            "created_at": ts,                # volatile: new timestamp each attempt
+        }
+
+    pending.merge_append("decisions_log", [decision_entry("uuid-1", "2026-06-24T00:00:00+00:00")])
+    # Same decision, retried — different entry_id AND created_at.
+    pending.merge_append("decisions_log", [decision_entry("uuid-2", "2026-06-24T00:05:00+00:00")])
+
+    entries = pending.get("decisions_log")["entries"]
+    assert len(entries) == 1, "retried identical decision must not duplicate"
+
+    # A genuinely different decision is still appended.
+    pending.merge_append("decisions_log", [
+        {**decision_entry("uuid-3", "2026-06-24T00:06:00+00:00"), "decision": "add redis"}
+    ])
+    assert len(pending.get("decisions_log")["entries"]) == 2
+
+
+def test_merge_append_dedups_assumption_by_stable_id(tmp_path: Path) -> None:
+    """Assumptions carry a stable id but no timestamp; a retry re-emits an identical
+    entry, which must collapse rather than accumulate."""
+    store = _store(tmp_path)
+    pending = PendingWrites(store)
+    entry = {
+        "id": "ASSUME-001",
+        "description": "auth is out of scope",
+        "impact": "high",
+        "record": True,
+        "run_id": "r1",
+        "source_agent": "coder",
+        "status": "open",
+    }
+    pending.merge_append("assumptions_log", [entry])
+    pending.merge_append("assumptions_log", [dict(entry)])
+    assert len(pending.get("assumptions_log")["entries"]) == 1
+
+
 def test_get_prefers_pending_over_disk(tmp_path: Path) -> None:
     """A full-document get via the staging map returns the pending value even when a
     different value is committed on disk — pending shadows disk within a run."""

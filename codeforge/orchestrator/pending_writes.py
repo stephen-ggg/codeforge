@@ -17,10 +17,35 @@ the full history is correct for agents reading mid-run.
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any
 
 from codeforge.schemas.contracts import ProjectStateDocument
 from codeforge.store.project_state import ProjectStateStore
+
+# Per-entry fields regenerated on every call (a fresh UUID, a fresh timestamp) and
+# therefore useless for retry dedup — two appends of the *same* logical entry differ
+# only in these. Excluded from the dedup signature so a retried append collapses.
+_VOLATILE_ENTRY_FIELDS: frozenset[str] = frozenset({"entry_id", "created_at"})
+
+
+def _entry_signature(entry: dict[str, Any]) -> str:
+    """Stable identity of an append-only entry, ignoring volatile fields.
+
+    decisions_log stamps a new entry_id (uuid4) and created_at on every append, so a
+    retry of the same decision is byte-different; assumptions_log carries a stable id
+    but no timestamp. Hashing the entry with the volatile fields stripped gives one
+    signature that dedups both across retries while still distinguishing genuinely
+    different entries (different decision/rationale, different assumption id).
+    """
+    stable = {k: v for k, v in entry.items() if k not in _VOLATILE_ENTRY_FIELDS}
+    if not stable:
+        # Entry carries only volatile fields — a degenerate stub. Fall back to the full
+        # entry so distinct stubs aren't collapsed into one. Real decisions/assumptions
+        # always carry stable content (decision/rationale, assumption id), so they still
+        # dedup across retries on that content.
+        stable = entry
+    return json.dumps(stable, sort_keys=True, ensure_ascii=False)
 
 
 class PendingWrites:
@@ -79,8 +104,10 @@ class PendingWrites:
           1. pending_writes map — accumulates within a run
           2. disk — prior committed state (baseline)
 
-        The merged result is written back to the pending_writes map.
-        Nothing touches disk here.
+        Entries already present (by stable signature) are skipped, so re-running a
+        step — gate re-prompts, code-bug reentry, resume — does not accumulate
+        duplicate decisions/assumptions. The merged result is written back to the
+        pending_writes map. Nothing touches disk here.
         """
         # Get current state — pending first, then disk
         current = self._map.get(document)
@@ -92,5 +119,14 @@ class PendingWrites:
             current = {"schema_version": "1.0.0", "entries": []}
 
         existing_entries: list[dict[str, Any]] = current.get("entries", [])
-        merged = {**current, "entries": existing_entries + new_entries}
+        seen: set[str] = {_entry_signature(e) for e in existing_entries}
+        appended: list[dict[str, Any]] = []
+        for entry in new_entries:
+            sig = _entry_signature(entry)
+            if sig in seen:
+                continue  # exact retry of an already-staged entry — drop the duplicate
+            seen.add(sig)
+            appended.append(entry)
+
+        merged = {**current, "entries": existing_entries + appended}
         self._map[document] = merged

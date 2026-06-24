@@ -5,10 +5,13 @@
 # The assembler reads this; it never makes a judgment call.
 # An omission is a correctness gap (logic errors) and a security gap (information barrier violations).
 #
-# allowed_consumers: agents that MAY receive this artifact
-# forbidden_consumers: agents explicitly denied — checked first, takes priority over allowed
-# If forbidden_consumers is empty, only agents in allowed_consumers may read.
-# If allowed_consumers is empty, all agents not in forbidden_consumers may read.
+# allowed_consumers: agents that MAY receive this artifact (REQUIRED, non-empty).
+#   The firewall is allow-list-first: only agents in this list may read.
+# forbidden_consumers: agents explicitly denied — checked first, takes priority over
+#   allowed. Defense-in-depth / intent documentation; an agent simply absent from
+#   allowed_consumers is already denied.
+# An empty allowed_consumers is rejected at load time — it would fail open (admit
+# every agent not explicitly forbidden), so the loader refuses to start.
 
 artifacts:
 

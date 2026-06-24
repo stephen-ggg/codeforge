@@ -119,6 +119,16 @@ def load_manifest(manifest_path: Path | None = None) -> FirewallManifest:
         allowed = _parse_actor_list(rules.get("allowed_consumers", []), f"artifacts.{art_type_str}.allowed_consumers")
         forbidden = _parse_actor_list(rules.get("forbidden_consumers", []), f"artifacts.{art_type_str}.forbidden_consumers")
 
+        # An empty allow-list fails open: is_allowed() would admit every agent not in
+        # forbidden_consumers, so a single forgotten forbidden entry silently leaks the
+        # artifact. Require an explicit whitelist — the firewall is allow-list-first.
+        if not allowed:
+            raise ValueError(
+                f"artifacts.{art_type_str}.allowed_consumers must be non-empty: an "
+                f"empty allow-list would fail open (every agent not explicitly "
+                f"forbidden could read this artifact). List every permitted consumer."
+            )
+
         manifest.artifact_access[art_type_str] = ArtifactAccess(
             artifact_type=cast(ArtifactType, art_type_str),
             allowed_consumers=allowed,
