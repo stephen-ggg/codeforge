@@ -137,6 +137,9 @@ GateRule = Literal[
     "ac_coverage_must",
     "arch_criteria_coverage",
     "coverage_map_valid",
+    "review_criteria_coverage",
+    "security_checklist_complete",
+    "coverage_update_present",
     "unique_test_paths",
     "requirements_txt_present",
     "package_json_dev_script",
@@ -304,6 +307,8 @@ class ContractViolationRePrompt(BaseModel):
     uncovered_ac_ids: list[str] | None = None
     unaddressed_ac_ids: list[str] | None = None
     mismatched_criterion_ids: list[str] | None = None
+    unrecorded_criterion_ids: list[str] | None = None
+    missing_checklist_categories: list[str] | None = None
     findings_missing_for_verdict: str | None = None
     missing_spec_gap_for: list[str] | None = None
     missing_requirements_txt: bool | None = None

@@ -37,10 +37,12 @@ formality you fill in afterward.
 ## The checklist must be complete
 
 Your `checklist` must contain an entry for **all ten** categories below, every time — each
-with `assessed: true` and a `result`. Use `not_applicable` honestly where the code has no
-relevant surface. A small feature with no I/O, no network, no auth, and no dependencies will
-legitimately be `not_applicable` across most categories — that is a correct and complete
-result, not a sign you missed something. Do not invent a finding to look thorough.
+with `assessed: true` and a `result`. **This is gate-enforced:** a checklist with fewer than
+ten `assessed: true` entries re-prompts you with `rule: "security_checklist_complete"`. Use
+`not_applicable` honestly where the code has no relevant surface. A small feature with no I/O,
+no network, no auth, and no dependencies will legitimately be `not_applicable` across most
+categories — that is a correct and complete result, not a sign you missed something. Do not
+invent a finding to look thorough.
 
 1. SQL / command injection
 2. Secrets and credentials in code
@@ -74,6 +76,9 @@ Include CWE ids where they apply (e.g. `CWE-89` injection, `CWE-798` hardcoded c
 
 - `rule: "verdict_has_findings"` — you returned `fail` with no findings. Add findings that
   justify it, or change the verdict.
+- `rule: "security_checklist_complete"` — your `checklist` assessed fewer than all ten
+  categories. Add the missing categories (each with `assessed: true` and a `result`; use
+  `not_applicable` where there is no relevant surface) and re-emit.
 
 ## What you must NOT do
 

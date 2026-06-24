@@ -37,6 +37,11 @@ from codeforge.schemas.contracts import (
 )
 
 
+# The security reviewer must assess all ten checklist categories every run
+# (see config/prompts/agents/security_reviewer/body.md — "The checklist must be complete").
+_SECURITY_CHECKLIST_CATEGORY_COUNT = 10
+
+
 class OutputValidator:
     """
     Three-stage validator for all agent outputs.
@@ -199,12 +204,9 @@ class OutputValidator:
                     original_input_ref=original_input_ref,
                     counter="malformed_output",
                 )
-            # D9: error severity forces fail
-            if any(f.severity == "error" for f in payload.findings) and payload.verdict != "fail":
-                # This is a contract-stage correction — not a reprompt; handled by orchestrator routing.
-                # We signal it here so the routing layer can apply the force.
-                # Returning True with a sentinel note — orchestrator checks this separately.
-                pass
+            # Note: D9 (error severity forces verdict: fail) is applied as a payload
+            # mutation in GateEvaluator._apply_severity_force before this validator runs,
+            # so by the time we get here payload.verdict is already coherent. No check here.
 
         # ---- Security reviewer ----
         if agent_id == "security_reviewer" and isinstance(payload, SecurityReport):
@@ -218,8 +220,40 @@ class OutputValidator:
                     counter="malformed_output",
                 )
 
+            # security_checklist_complete: the checklist must assess all ten categories
+            # every run (the prompt mandates this). A short or partly-unassessed checklist
+            # means the review skipped categories — enforce completeness, not just findings.
+            assessed = [c for c in payload.checklist if c.assessed]
+            if len(assessed) < _SECURITY_CHECKLIST_CATEGORY_COUNT:
+                return False, self._make_violation(
+                    rule="security_checklist_complete",
+                    detail=(
+                        f"security checklist must assess all "
+                        f"{_SECURITY_CHECKLIST_CATEGORY_COUNT} categories with assessed=true; "
+                        f"got {len(assessed)} assessed of {len(payload.checklist)} entries"
+                    ),
+                    missing_checklist_categories=[
+                        c.category for c in payload.checklist if not c.assessed
+                    ],
+                    attempt_number=attempt_number,
+                    original_input_ref=original_input_ref,
+                    counter="malformed_output",
+                )
+
         # ---- Test analyst ----
         if agent_id == "test_analyst" and isinstance(payload, TestAnalysis):
+            # coverage_update_present: a "pass" verdict means every tested AC passed, so the
+            # analyst must record coverage for them. An empty coverage_update on pass drops
+            # the coverage signal the test_coverage_map is built from — enforce it.
+            if payload.verdict == "pass" and not payload.coverage_update:
+                return False, self._make_violation(
+                    rule="coverage_update_present",
+                    detail="verdict is 'pass' but coverage_update is empty — record coverage for every tested criterion",
+                    attempt_number=attempt_number,
+                    original_input_ref=original_input_ref,
+                    counter="malformed_output",
+                )
+
             fail_verdicts = {
                 "fail_code_bug", "fail_test_bug", "fail_spec_gap", "fail_ambiguous"
             }
@@ -286,10 +320,16 @@ class OutputValidator:
                                 pass  # unapplicable edits are caught by the structural validator
                         pkg = json.loads(resolved)
                         scripts = pkg.get("scripts", {})
-                        if "dev" not in scripts:
+                        # Presence alone is not enough: the dev script must actually run
+                        # `next dev` (the command the run/verify tooling invokes). A "dev"
+                        # entry pointing at anything else (e.g. "next build", "vite") leaves
+                        # the app unrunnable, so check the value, not just the key. Allow
+                        # trailing flags like `next dev --port 3000`.
+                        dev_script = scripts.get("dev")
+                        if not isinstance(dev_script, str) or "next dev" not in dev_script:
                             return False, self._make_violation(
                                 rule="package_json_dev_script",
-                                detail='package.json scripts is missing "dev": "next dev" — add it so the app can be run locally',
+                                detail='package.json scripts must define "dev": "next dev" (optionally with flags) so the app can be run locally',
                                 missing_requirements_txt=False,
                                 attempt_number=attempt_number,
                                 original_input_ref=original_input_ref,
@@ -499,3 +539,44 @@ class OutputValidator:
             if cid not in valid_ac_ids:
                 mismatched.append(cid)
         return mismatched
+
+    def check_coverage_map_complete(
+        self,
+        coverage_map: list[dict[str, Any]],
+        must_ac_ids: list[str],
+    ) -> list[str]:
+        """
+        Returns must-priority AC ids NOT covered by at least one test case in coverage_map.
+
+        check_coverage_map_valid only rejects phantom ids (one direction); this is the
+        other direction — every must AC must be exercised by a test. An entry covers its
+        AC only when it carries a non-empty test_case_ids list. Empty result means the
+        gate passes.
+        """
+        covered: set[str] = set()
+        for entry in coverage_map:
+            cid = entry.get("criterion_id", "")
+            test_ids = entry.get("test_case_ids") or []
+            if cid and test_ids:
+                covered.add(cid)
+        return [ac_id for ac_id in must_ac_ids if ac_id not in covered]
+
+    def check_review_criteria_coverage(
+        self,
+        criteria_coverage: list[dict[str, Any]],
+        must_ac_ids: list[str],
+    ) -> list[str]:
+        """
+        Returns must-priority AC ids the code reviewer did not record in criteria_coverage.
+
+        Presence is what's enforced, not the addressed flag: a reviewer may legitimately
+        mark a must AC addressed=false (that drives a correctness finding / fail verdict),
+        but it must not silently omit the AC from its coverage assessment entirely.
+        Empty result means the gate passes.
+        """
+        recorded = {
+            entry.get("criterion_id", "")
+            for entry in criteria_coverage
+            if entry.get("criterion_id")
+        }
+        return [ac_id for ac_id in must_ac_ids if ac_id not in recorded]

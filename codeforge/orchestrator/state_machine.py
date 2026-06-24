@@ -1260,6 +1260,7 @@ class StateMachine:
                 assembly_id=pkg.assembly_id,
                 counters=self.run.retry_counters,
                 agent_call_count=self.run.agent_call_count,
+                requirements_doc=requirements_doc,
             )
 
             if not gate_result.structural_passed or not gate_result.contract_passed:

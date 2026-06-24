@@ -316,6 +316,47 @@ class GateEvaluator:
                     original_input_ref=assembly_id,
                     counter="test_loop",
                 )
+            # The phantom-id check above is one direction; this is the other — every
+            # must-priority AC must actually be covered by a test case, or it ships untested.
+            must_ids = [
+                ac.id for ac in requirements_doc.acceptance_criteria
+                if ac.priority == "must"
+            ]
+            uncovered_must = self._validator.check_coverage_map_complete(
+                coverage_map_list, must_ids
+            )
+            if uncovered_must:
+                return False, self._validator._make_violation(
+                    rule="coverage_map_valid",
+                    detail=(
+                        "must-priority ACs are not covered by any test case in "
+                        f"coverage_map: {uncovered_must}"
+                    ),
+                    uncovered_ac_ids=uncovered_must,
+                    attempt_number=attempt_number,
+                    original_input_ref=assembly_id,
+                    counter="test_loop",
+                )
+
+        # review_criteria_coverage: the code reviewer must record every must AC in its
+        # criteria_coverage (addressed true/false) — it must not silently omit any.
+        elif agent_id == "code_reviewer" and isinstance(payload, ReviewReport):
+            must_ids = [
+                ac.id for ac in requirements_doc.acceptance_criteria
+                if ac.priority == "must"
+            ]
+            unrecorded = self._validator.check_review_criteria_coverage(
+                payload.criteria_coverage, must_ids
+            )
+            if unrecorded:
+                return False, self._validator._make_violation(
+                    rule="review_criteria_coverage",
+                    detail=f"must-priority ACs not recorded in criteria_coverage: {unrecorded}",
+                    unrecorded_criterion_ids=unrecorded,
+                    attempt_number=attempt_number,
+                    original_input_ref=assembly_id,
+                    counter="malformed_output",
+                )
 
         return True, None
 

@@ -9,8 +9,13 @@ import pytest
 from codeforge.orchestrator.event_log import EventLog
 from codeforge.orchestrator.gates import GateEvaluator
 from codeforge.schemas.contracts import (
+    AcceptanceCriterion,
+    CodeReviewerOutput,
+    CoderOutput,
+    RequirementsDoc,
     RetryCounters,
     SecurityReviewerOutput,
+    TestAnalystOutput,
     TestDesignerOutput,
 )
 from codeforge.schemas.validation import OutputValidator
@@ -18,6 +23,12 @@ from codeforge.schemas.validation import OutputValidator
 _CONFIG: dict[str, Any] = {
     "confidence_thresholds": {"security_reviewer": 0.90},
     "global_ceiling": {"max_agent_calls_per_run": 40},
+}
+
+_NEXTJS_CONFIG: dict[str, Any] = {
+    "confidence_thresholds": {},
+    "global_ceiling": {"max_agent_calls_per_run": 40},
+    "stack_profile": {"manifest_filename": "package.json", "manifest_required": True},
 }
 
 
@@ -28,13 +39,45 @@ def gates(tmp_path: Path) -> GateEvaluator:
     return GateEvaluator(validator, event_log, _CONFIG)
 
 
+@pytest.fixture
+def nextjs_gates(tmp_path: Path) -> GateEvaluator:
+    validator = OutputValidator(_NEXTJS_CONFIG)
+    event_log = EventLog(tmp_path / "run-nx", "run-nx", "0.0.0")
+    return GateEvaluator(validator, event_log, _NEXTJS_CONFIG)
+
+
+def _requirements_doc(*must_ids: str) -> RequirementsDoc:
+    """Minimal RequirementsDoc whose listed ACs are all must-priority."""
+    return RequirementsDoc(
+        run_id="run-1",
+        run_mode="new_project",
+        feature_title="t",
+        feature_description="d",
+        scope={"in_scope": [], "explicitly_out_of_scope": []},
+        acceptance_criteria=[
+            AcceptanceCriterion(id=i, description="d", testable=True, priority="must")
+            for i in must_ids
+        ],
+        data_contracts=[],
+        human_confirmed_decisions=[],
+    )
+
+
+def _full_checklist() -> list[dict[str, Any]]:
+    """Ten assessed checklist entries — satisfies the security_checklist_complete gate."""
+    return [
+        {"category": f"cat-{i}", "assessed": True, "result": "not_applicable", "notes": "n/a"}
+        for i in range(10)
+    ]
+
+
 def _security_envelope(finding: dict[str, Any], verdict: str = "pass") -> str:
     return json.dumps({
         "output": {
             "verdict": verdict,
             "summary": "test",
             "findings": [finding],
-            "checklist": [],
+            "checklist": _full_checklist(),
         },
         "assumptions_made": [],
         "confidence": 0.99,
@@ -135,3 +178,193 @@ def test_unique_test_paths_pass_contract(gates: GateEvaluator) -> None:
     )
     assert result.contract_passed is True
     assert result.violation_reprompt is None
+
+
+# ---------------------------------------------------------------------------
+# coverage_map_valid — must-AC completeness (the other direction)
+# ---------------------------------------------------------------------------
+
+def _td_envelope_for_acs(covered_ac_ids: list[str]) -> str:
+    """One test case per covered AC; coverage_map covers exactly covered_ac_ids."""
+    cases = [
+        {
+            "id": f"TC-{i:03d}", "title": "c", "criterion_ids": [ac],
+            "type": "unit", "description": "d",
+            "code": [{
+                "path": f"tests/test_{i}.py", "content": "def test_x():\n    assert True\n",
+                "language": "python", "change_type": "new", "change_reason": None,
+            }],
+            "explicitly_not_testing": [],
+        }
+        for i, ac in enumerate(covered_ac_ids)
+    ]
+    return json.dumps({
+        "output": {
+            "test_cases": cases,
+            "test_infrastructure": [],
+            "coverage_map": [
+                {"criterion_id": ac, "test_case_ids": [f"TC-{i:03d}"]}
+                for i, ac in enumerate(covered_ac_ids)
+            ],
+        },
+        "assumptions_made": [], "confidence": 0.9, "unresolved_flags": [],
+    })
+
+
+def test_coverage_map_uncovered_must_ac_fails(gates: GateEvaluator) -> None:
+    """A must AC with no covering test case fails coverage_map_valid (completeness)."""
+    result = gates.evaluate(
+        raw=_td_envelope_for_acs(["AC-001"]),
+        expected_model=TestDesignerOutput,
+        agent_id="test_designer",
+        attempt_number=0,
+        assembly_id="a",
+        counters=RetryCounters(),
+        agent_call_count=1,
+        requirements_doc=_requirements_doc("AC-001", "AC-002"),
+    )
+    assert result.contract_passed is False
+    assert result.violation_reprompt is not None
+    assert result.violation_reprompt.rule == "coverage_map_valid"
+    assert result.violation_reprompt.uncovered_ac_ids == ["AC-002"]
+
+
+def test_coverage_map_all_must_covered_passes(gates: GateEvaluator) -> None:
+    result = gates.evaluate(
+        raw=_td_envelope_for_acs(["AC-001", "AC-002"]),
+        expected_model=TestDesignerOutput,
+        agent_id="test_designer",
+        attempt_number=0,
+        assembly_id="a",
+        counters=RetryCounters(),
+        agent_call_count=1,
+        requirements_doc=_requirements_doc("AC-001", "AC-002"),
+    )
+    assert result.contract_passed is True
+
+
+# ---------------------------------------------------------------------------
+# package_json_dev_script — value must run `next dev`, not just key presence
+# ---------------------------------------------------------------------------
+
+def _coder_envelope(dev_value: str | None) -> str:
+    scripts = {} if dev_value is None else {"dev": dev_value}
+    pkg = {"name": "app", "scripts": scripts}
+    return json.dumps({
+        "output": {
+            "files": [{
+                "path": "package.json", "content": json.dumps(pkg),
+                "language": "json", "change_type": "new", "change_reason": None,
+            }],
+            "module_interfaces": {"files": []},
+            "change_summary": "s",
+            "criteria_addressed": [],
+            "interface_changes": [],
+        },
+        "assumptions_made": [], "confidence": 0.9, "unresolved_flags": [],
+    })
+
+
+def _evaluate_coder(gates: GateEvaluator, raw: str) -> Any:
+    return gates.evaluate(
+        raw=raw, expected_model=CoderOutput, agent_id="coder",
+        attempt_number=0, assembly_id="a", counters=RetryCounters(), agent_call_count=1,
+    )
+
+
+def test_dev_script_wrong_value_fails(nextjs_gates: GateEvaluator) -> None:
+    """A `dev` script that doesn't run `next dev` fails — presence alone isn't enough."""
+    result = _evaluate_coder(nextjs_gates, _coder_envelope("next build"))
+    assert result.contract_passed is False
+    assert result.violation_reprompt.rule == "package_json_dev_script"
+
+
+def test_dev_script_missing_key_fails(nextjs_gates: GateEvaluator) -> None:
+    result = _evaluate_coder(nextjs_gates, _coder_envelope(None))
+    assert result.contract_passed is False
+    assert result.violation_reprompt.rule == "package_json_dev_script"
+
+
+def test_dev_script_next_dev_with_flags_passes(nextjs_gates: GateEvaluator) -> None:
+    result = _evaluate_coder(nextjs_gates, _coder_envelope("next dev --port 3000"))
+    assert result.contract_passed is True
+
+
+# ---------------------------------------------------------------------------
+# review_criteria_coverage — reviewer must record every must AC
+# ---------------------------------------------------------------------------
+
+def _review_envelope(recorded_ac_ids: list[str]) -> str:
+    return json.dumps({
+        "output": {
+            "verdict": "pass", "summary": "s", "findings": [],
+            "criteria_coverage": [
+                {"criterion_id": ac, "addressed": True, "notes": "n"}
+                for ac in recorded_ac_ids
+            ],
+        },
+        "assumptions_made": [], "confidence": 0.99, "unresolved_flags": [],
+    })
+
+
+def _evaluate_reviewer(gates: GateEvaluator, raw: str, req: RequirementsDoc) -> Any:
+    return gates.evaluate(
+        raw=raw, expected_model=CodeReviewerOutput, agent_id="code_reviewer",
+        attempt_number=0, assembly_id="a", counters=RetryCounters(), agent_call_count=1,
+        requirements_doc=req,
+    )
+
+
+def test_review_criteria_coverage_omitted_must_ac_fails(gates: GateEvaluator) -> None:
+    result = _evaluate_reviewer(
+        gates, _review_envelope(["AC-001"]), _requirements_doc("AC-001", "AC-002")
+    )
+    assert result.contract_passed is False
+    assert result.violation_reprompt.rule == "review_criteria_coverage"
+    assert result.violation_reprompt.unrecorded_criterion_ids == ["AC-002"]
+
+
+def test_review_criteria_coverage_all_recorded_passes(gates: GateEvaluator) -> None:
+    result = _evaluate_reviewer(
+        gates, _review_envelope(["AC-001", "AC-002"]), _requirements_doc("AC-001", "AC-002")
+    )
+    assert result.contract_passed is True
+
+
+# ---------------------------------------------------------------------------
+# security_checklist_complete — all ten categories assessed
+# ---------------------------------------------------------------------------
+
+def test_security_checklist_incomplete_fails(gates: GateEvaluator) -> None:
+    raw = json.dumps({
+        "output": {
+            "verdict": "pass", "summary": "s", "findings": [],
+            "checklist": [
+                {"category": "c", "assessed": True, "result": "clean", "notes": "n"}
+            ],  # only 1 of 10
+        },
+        "assumptions_made": [], "confidence": 0.99, "unresolved_flags": [],
+    })
+    result = _evaluate(gates, raw)
+    assert result.contract_passed is False
+    assert result.violation_reprompt.rule == "security_checklist_complete"
+
+
+# ---------------------------------------------------------------------------
+# coverage_update_present — pass verdict must record coverage
+# ---------------------------------------------------------------------------
+
+def test_coverage_update_empty_on_pass_fails(gates: GateEvaluator) -> None:
+    raw = json.dumps({
+        "output": {
+            "verdict": "pass", "summary": "s",
+            "failure_analyses": [], "coverage_update": [],
+        },
+        "assumptions_made": [], "confidence": 0.99, "unresolved_flags": [],
+    })
+    result = gates.evaluate(
+        raw=raw, expected_model=TestAnalystOutput, agent_id="test_analyst",
+        attempt_number=0, assembly_id="a", counters=RetryCounters(), agent_call_count=1,
+    )
+    assert result.contract_passed is False
+    assert result.violation_reprompt.rule == "coverage_update_present"
