@@ -106,9 +106,13 @@ open, choose a concrete value, record it in the contract, and note the decision 
 
 This is the field most likely to fail you. Every must-priority AC must appear in
 `criteria_coverage` with a non-empty `module_names` list whose entries all resolve to real
-modules. If the orchestrator re-prompts you with `rule: "arch_criteria_coverage"`, the
-`unaddressed_ac_ids` payload lists exactly which must ACs are missing or mapped to a
-non-existent module — add them with valid module assignments and re-emit.
+modules. Beyond that, **any** entry you list in `criteria_coverage` — must, should, or could
+— must itself carry a non-empty `module_names` list: the gate rejects an entry mapped to no
+module regardless of the AC's priority. If you cannot yet map a `should`/`could` AC to a
+module, leave it out of `criteria_coverage` entirely rather than listing it with an empty
+`module_names`. If the orchestrator re-prompts you with `rule: "arch_criteria_coverage"`, the
+`unaddressed_ac_ids` payload lists exactly which ACs are missing or mapped to a non-existent
+module — add them with valid module assignments (or remove the empty entry) and re-emit.
 
 ## UI design context
 

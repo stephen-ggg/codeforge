@@ -29,9 +29,14 @@ class RunMode(str, Enum):
     continuation = "continuation"
 
 from codeforge.cli.interaction import HumanInteraction, reentry_options_for
-from codeforge.cli.lock import CodeforgeAlreadyRunningError, CodeforgeLock
+from codeforge.cli.lock import CodeforgeLock, CodeforgeLockError
 from codeforge.config.config_loader import load_config
-from codeforge.orchestrator.state_machine import EscalationError, StateMachine
+from codeforge.orchestrator.state_machine import (
+    ConfigChangedError,
+    EscalationError,
+    SchemaVersionMismatchError,
+    StateMachine,
+)
 from codeforge.schemas.contracts import (
     CodeforgeRun,
     CommitWriterInput,
@@ -134,10 +139,31 @@ def _select_resume_escalation(
 
 
 def _initial_state_from(escalation: "EscalationEvent | None") -> str:
-    """Reentry state for resume: the escalation's reentry_directive, else requirements."""
+    """Reentry state for resume.
+
+    Priority: the resolution's reentry_directive, else the escalation's
+    suggested_reentry_state (the phase that was running when it fired), else
+    requirements. Falling back to the suggested phase avoids a full pipeline restart
+    (re-prompting the human, regenerating existing artifacts) for an escalation that
+    was resolved without an explicit directive.
+    """
     if escalation and escalation.resolution and escalation.resolution.reentry_directive:
         return escalation.resolution.reentry_directive.reentry_state
+    if escalation and escalation.suggested_reentry_state:
+        return escalation.suggested_reentry_state
     return "requirements"
+
+
+def _confirm_config_change(changes: list[dict[str, Any]]) -> bool:
+    """Interactive callback: show the config diff and ask the operator to confirm.
+
+    Used only on the interactive resume path; programmatic callers pass
+    --allow-config-change instead.
+    """
+    typer.echo("\nThe config has changed since this run started:")
+    for change in changes:
+        typer.echo(f"  {change['path']}: {change['old']!r} -> {change['new']!r}")
+    return typer.confirm("Resume under the new config? (the change will be recorded)")
 
 
 def _do_commit(
@@ -452,14 +478,16 @@ def run(
 
     try:
         lock.acquire()
-    except CodeforgeAlreadyRunningError as exc:
+    except CodeforgeLockError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 
     run_log_dir = _run_log_dir(project_dir)
-    sm = StateMachine(config, project_dir, run_log_dir)
+    # Constructed inside the try so a constructor failure still releases the lock.
+    sm: StateMachine | None = None
 
     try:
+        sm = StateMachine(config, project_dir, run_log_dir)
         codeforge_run = sm.start_run(run_mode.value, resolved_brief)
         _save_brief(run_log_dir, codeforge_run.run_id, resolved_brief)
         typer.echo(f"Run started: {codeforge_run.run_id}")
@@ -470,7 +498,7 @@ def run(
         _do_commit(sm, req_doc, code_art, test_suite, config, project_dir)
 
     except EscalationError as exc:
-        run_id = sm.run.run_id if sm._run else "unknown"
+        run_id = sm.run.run_id if sm is not None and sm._run else "unknown"
         typer.echo(f"\nCodeforge escalated: {exc.reason}", err=True)
         if exc.phase:
             typer.echo(f"Phase: {exc.phase}", err=True)
@@ -482,7 +510,8 @@ def run(
         raise typer.Exit(2)
 
     except Exception as exc:
-        sm.mark_failed_terminal()
+        if sm is not None:
+            sm.mark_failed_terminal()
         typer.echo(f"Codeforge failed with unexpected error: {exc}", err=True)
         raise typer.Exit(1)
 
@@ -530,6 +559,15 @@ def resume(
         help="Non-interactive: human notes attached to the resolution.",
         show_default=False,
     ),
+    allow_config_change: bool = typer.Option(
+        False,
+        "--allow-config-change",
+        help=(
+            "Permit resuming under a config that differs from the run's persisted "
+            "snapshot. The change is recorded to the run's audit trail. A schema_version "
+            "change is never permitted (start a new run instead)."
+        ),
+    ),
 ) -> None:
     """
     Resume a codeforge run that was interrupted by an escalation.
@@ -552,13 +590,16 @@ def resume(
 
     try:
         lock.acquire()
-    except CodeforgeAlreadyRunningError as exc:
+    except CodeforgeLockError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 
-    sm = StateMachine(config, project_dir, run_log_dir)
+    # Constructed inside the try so a constructor (or CodeforgeRun parse) failure still
+    # releases the lock and is handled by the terminal-failure path below.
+    sm: StateMachine | None = None
 
     try:
+        sm = StateMachine(config, project_dir, run_log_dir)
         codeforge_run = CodeforgeRun(**run_data)
 
         # Nothing to resume on a completed run.
@@ -606,6 +647,16 @@ def resume(
 
         sm.resume_run(codeforge_run)
 
+        # Reconcile the run's persisted config snapshot against the current on-disk
+        # config: hard-block on a schema_version change, and require explicit opt-in
+        # (flag or interactive confirm) for any other drift. Prompt only in
+        # interactive mode (no --decision); programmatic callers must pass the flag.
+        confirm_cb = None if decision is not None else _confirm_config_change
+        sm.reconcile_config_on_resume(
+            allow_config_change=allow_config_change,
+            interactive_confirm=confirm_cb,
+        )
+
         # Write human_override entry only when the operator just modified the run.
         # Gated on freshly_resolved so re-resumes don't duplicate the entry.
         if (
@@ -614,27 +665,23 @@ def resume(
             and escalation.resolution
             and escalation.resolution.outcome == "modified"
         ):
-            import uuid as _uuid
-            from datetime import datetime, timezone
-            sm.pending.merge_append("decisions_log", [{
-                "entry_id": str(_uuid.uuid4()),
-                "run_id": run_id,
-                "entry_type": "human_override",
-                "source_agent": None,
-                "decision": escalation.resolution.change_summary or "",
-                "rationale": escalation.resolution.human_notes,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }])
+            sm.record_human_override(
+                escalation.resolution.change_summary or "",
+                escalation.resolution.human_notes,
+            )
 
         # Apply the resolution's reentry directive (if any). This runs for both a
         # freshly-resolved and a previously-resolved escalation so re-resumes land
         # at the same reentry state. counter_resets reset to 0 (idempotent); a
         # reset_global_ceiling re-zeroes agent_call_count, which is acceptable
         # because this path only runs when a prior resume did not complete.
-        initial_state = "requirements"
+        # Reentry precedence (directive → suggested_reentry_state → requirements) lives in
+        # _initial_state_from, shared with the echo at the top of this function so the
+        # message and the actual reentry can't diverge. When a directive is present we
+        # additionally apply its counter resets / ceiling reset below.
+        initial_state = _initial_state_from(escalation)
         if escalation and escalation.resolution and escalation.resolution.reentry_directive:
             directive = escalation.resolution.reentry_directive
-            initial_state = directive.reentry_state
             from codeforge.orchestrator.routing import RoutingOutcome as _RO
             reset_outcome = _RO(
                 row_id="X-resume",
@@ -661,6 +708,31 @@ def resume(
         # own code and must not be treated as a terminal failure.
         raise
 
+    except SchemaVersionMismatchError as exc:
+        typer.echo(
+            f"\nCannot resume: {exc}.\n"
+            "A schema_version change can make persisted artifacts incompatible. "
+            "Start a new run instead.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    except ConfigChangedError as exc:
+        typer.echo(
+            "\nCannot resume: the config has changed since this run started.",
+            err=True,
+        )
+        for change in exc.changes:
+            typer.echo(
+                f"  {change['path']}: {change['old']!r} -> {change['new']!r}", err=True
+            )
+        typer.echo(
+            "\nRe-run with --allow-config-change to resume under the new config "
+            "(the change will be recorded to the run's audit trail).",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     except EscalationError as exc:
         typer.echo(f"\nCodeforge escalated again: {exc.reason}", err=True)
         if exc.phase:
@@ -669,7 +741,8 @@ def resume(
         raise typer.Exit(2)
 
     except Exception as exc:
-        sm.mark_failed_terminal()
+        if sm is not None:
+            sm.mark_failed_terminal()
         typer.echo(f"Codeforge failed: {exc}", err=True)
         raise typer.Exit(1)
 

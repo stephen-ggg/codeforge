@@ -75,6 +75,17 @@ class TestRunner:
         )
         workdir = profile.workdir
 
+        # Environment injected into the sandbox: the base set from test_runner config,
+        # overlaid by any per-run overrides in run_config. Set at container-create time so
+        # every exec_run (install, build, and the test command) inherits it — this is how
+        # stacks that read runtime config from the environment (e.g. Supabase URL/keys) get
+        # their values. Without it, those reads return undefined and surface as opaque test
+        # failures rather than a configurable, explicit env.
+        environment = {
+            **self._config.test_runner.environment_vars,
+            **input.run_config.get("environment_vars", {}),
+        }
+
         # Resolve the full set of source files to stage. For continuation we start
         # from the existing repo and apply the coder's deltas (new / edits / delete)
         # so tests run against the WHOLE tree, not just the changed files.
@@ -112,6 +123,7 @@ class TestRunner:
                 image=sandbox_image,
                 command="sleep infinity",
                 working_dir=workdir,
+                environment=environment,
             )
             container.start()
 

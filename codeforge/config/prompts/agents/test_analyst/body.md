@@ -99,6 +99,8 @@ On `pass`, populate `coverage_update` for every tested AC (`covered` / `partial`
   analyses that justify it.
 - `rule: "spec_gap_has_description"` — `fail_spec_gap` with no `spec_gap`; populate it on the
   relevant entry.
+- `rule: "coverage_update_present"` — a `pass` verdict with an empty `coverage_update`. Record
+  a `coverage_update` entry for every tested criterion (`covered`/`partial`/`not_covered`).
 
 ## What you must NOT do
 

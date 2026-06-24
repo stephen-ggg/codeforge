@@ -9,6 +9,7 @@ re-prompt.
 from __future__ import annotations
 
 from codeforge.orchestrator.routing import (
+    route_block_flag,
     route_low_confidence_reprompt,
     route_test_analysis_code_bug,
     route_test_analysis_recoverable_error,
@@ -69,6 +70,21 @@ def test_unmapped_phase_returns_none() -> None:
 
 
 # ----------------------------------------------------------------------
+# block flag — immediate, terminal halt with no retry budget consumed
+# ----------------------------------------------------------------------
+
+
+def test_route_block_flag_is_terminal_and_consumes_no_budget() -> None:
+    out = route_block_flag()
+    assert out.decision == "escalate"
+    assert out.next_state == "failed_escalated"
+    assert out.escalation_reason == "block_flag"
+    # The "no retry" contract: a block flag must not touch any retry counter.
+    assert out.counter_deltas == {}
+    assert out.counter_resets == []
+
+
+# ----------------------------------------------------------------------
 # low-confidence one-shot re-prompt
 # ----------------------------------------------------------------------
 
@@ -112,6 +128,10 @@ def test_test_bug_retry_resets_reprompt_cushions() -> None:
     assert out.next_state == "test_design"
     assert "test_designer_low_confidence_reprompt" in out.counter_resets
     assert "malformed_output" in out.counter_resets
+    # test_bug re-enters at test_design, which does NOT re-run the review pipeline —
+    # so the review-loop budgets must NOT be reset here (would inflate them later).
+    assert "code_review_loop" not in out.counter_resets
+    assert "security_review_loop" not in out.counter_resets
 
 
 def test_code_bug_retry_resets_reprompt_cushions() -> None:
@@ -119,6 +139,19 @@ def test_code_bug_retry_resets_reprompt_cushions() -> None:
     assert out.next_state == "coding"
     assert "coder_low_confidence_reprompt" in out.counter_resets
     assert "malformed_output" in out.counter_resets
+    # Re-enters coding → re-runs code_review + security_review, so their loop
+    # budgets are restored too.
+    assert "code_review_loop" in out.counter_resets
+    assert "security_review_loop" in out.counter_resets
+    # ...and the per-invocation low-confidence cushions of every agent the re-run
+    # re-invokes (coder → reviewers → test_designer → test_analyst), so an agent that
+    # spent its one nudge in a prior cycle isn't denied it on the fresh invocation.
+    assert "code_reviewer_low_confidence_reprompt" in out.counter_resets
+    assert "security_reviewer_low_confidence_reprompt" in out.counter_resets
+    assert "test_designer_low_confidence_reprompt" in out.counter_resets
+    assert "test_analyst_low_confidence_reprompt" in out.counter_resets
+    # ...but NOT architecture: code_bug re-enters at coding, not architecture.
+    assert "architecture_designer_low_confidence_reprompt" not in out.counter_resets
 
 
 def test_spec_gap_retry_resets_reprompt_cushions_and_review_loops() -> None:
@@ -132,6 +165,9 @@ def test_spec_gap_retry_resets_reprompt_cushions_and_review_loops() -> None:
     assert "coder_low_confidence_reprompt" in out.counter_resets
     assert "code_reviewer_low_confidence_reprompt" in out.counter_resets
     assert "security_reviewer_low_confidence_reprompt" in out.counter_resets
+    # … including the test-phase agents, which the full re-run also exercises.
+    assert "test_designer_low_confidence_reprompt" in out.counter_resets
+    assert "test_analyst_low_confidence_reprompt" in out.counter_resets
     assert "malformed_output" in out.counter_resets
 
 

@@ -20,11 +20,11 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import Any, Callable, NoReturn, TypeVar, cast
 
 logger = logging.getLogger(__name__)
 
-from codeforge.config.config_loader import ConfigSnapshot
+from codeforge.config.config_loader import ConfigSnapshot, diff_config_snapshots
 from codeforge.firewall.assembler import ContextAssembler, ContextPackage
 from codeforge.firewall.manifest import FirewallManifest, load_manifest
 from codeforge.model_router.router import ModelRouter
@@ -103,6 +103,9 @@ from codeforge.store.artifact_store import ArtifactStore
 from codeforge.store.project_state import ProjectStateStore
 
 
+_ArtifactModel = TypeVar("_ArtifactModel")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -130,6 +133,37 @@ class EscalationError(Exception):
         self.context = context
         self.phase = phase
         super().__init__(f"Codeforge escalated: {reason} — {context}")
+
+
+class ConfigChangedError(Exception):
+    """Raised on resume when the on-disk config differs from the run's persisted
+    snapshot and the operator has not opted in to the change.
+
+    Carries the structured diff (from diff_config_snapshots) so the CLI can render
+    it for the operator. No config mutation has occurred when this is raised — the
+    persisted snapshot is left intact.
+    """
+
+    def __init__(self, changes: list[dict[str, Any]]) -> None:
+        self.changes = changes
+        super().__init__(f"Config changed since run start ({len(changes)} field(s))")
+
+
+class SchemaVersionMismatchError(Exception):
+    """Raised on resume when the run's persisted config schema_version differs from
+    the current config's. A hard block (not overridable by --allow-config-change):
+    a schema change can make persisted artifacts incompatible.
+    """
+
+    reason: EscalationReason = "schema_version_mismatch"
+
+    def __init__(self, persisted: str, current: str) -> None:
+        self.persisted = persisted
+        self.current = current
+        super().__init__(
+            f"Config schema_version changed since run start: "
+            f"persisted={persisted!r} current={current!r}"
+        )
 
 
 class StateMachine:
@@ -228,16 +262,25 @@ class StateMachine:
             source_root=Path(repos.source_code.path) if repos and repos.source_code.path else None,
         )
 
-        self._event_log.update_run_snapshot(self._run)
+        self._save_run_state()
         return self._run
 
     def resume_run(self, run: CodeforgeRun) -> None:
-        """Restore state from a persisted CodeforgeRun (codeforge resume command)."""
+        """Restore state from a persisted CodeforgeRun (codeforge resume command).
+
+        The persisted config_snapshot is left intact here; config reconciliation
+        (schema-version gate + drift detection / opt-in) is handled separately by
+        reconcile_config_on_resume(), which the CLI calls immediately after this.
+        """
         self._run = run
-        self._run.config_snapshot = self._config.to_dict()
         run_log_dir = self._run_log_dir / run.run_id
         self._artifact_store = ArtifactStore(run_log_dir)
         self._pending = PendingWrites(self._project_state)
+        # Rehydrate the writes the prior session staged (persisted onto run.pending_writes
+        # by _save_run_state) so the resumed run flushes the complete project state at
+        # commit. Without this the phases that staged them are skipped on resume and the
+        # writes are lost (review finding #2).
+        self._pending.restore(run.pending_writes or {})
         self._event_log = EventLog(run_log_dir, run.run_id, self._config.name)
         self._validator = OutputValidator(self._config.to_dict())
         self._gates = GateEvaluator(self._validator, self._event_log, self._config.to_dict())
@@ -253,6 +296,91 @@ class StateMachine:
             run_log_dir=run_log_dir,
             source_root=Path(repos.source_code.path) if repos and repos.source_code.path else None,
         )
+
+    def reconcile_config_on_resume(
+        self,
+        *,
+        allow_config_change: bool,
+        interactive_confirm: "Callable[[list[dict[str, Any]]], bool] | None" = None,
+    ) -> None:
+        """Reconcile the persisted config snapshot against the current config.
+
+        Must be called after resume_run() (it relies on the event log + run object).
+
+        - Schema gate (hard): if the persisted config schema_version differs from the
+          current one, emit a failing schema_version_match gate and raise
+          SchemaVersionMismatchError. Never overridable — a schema change can make
+          persisted artifacts incompatible. Deliberately does NOT stack an
+          EscalationEvent (reconciliation re-runs every resume, which would compound
+          into an unresumable loop).
+        - Config drift (soft): diff the remaining fields. With no changes, the snapshot
+          already matches and is left as-is. With changes, proceed only when the
+          operator opted in (allow_config_change, or interactive_confirm returns True);
+          then record the change and adopt the current config. Otherwise raise
+          ConfigChangedError with the diff and leave the snapshot untouched.
+        """
+        persisted = dict(self.run.config_snapshot)
+        current = self._config.to_dict()
+
+        persisted_schema = persisted.get("schema_version")
+        current_schema = current.get("schema_version")
+        schema_ok = persisted_schema == current_schema
+        self.event_log.emit_gate(
+            rule="schema_version_match",
+            passed=schema_ok,
+            source_agent="orchestrator",
+            counters=self._counters_snap(),
+            detail=f"persisted={persisted_schema} current={current_schema}",
+        )
+        if not schema_ok:
+            raise SchemaVersionMismatchError(
+                str(persisted_schema), str(current_schema)
+            )
+
+        changes = diff_config_snapshots(persisted, current)
+        if not changes:
+            return
+
+        approved = allow_config_change or (
+            interactive_confirm is not None and interactive_confirm(changes)
+        )
+        if not approved:
+            raise ConfigChangedError(changes)
+
+        self.record_config_change(changes)
+
+    def record_config_change(self, changes: list[dict[str, Any]]) -> None:
+        """Record an operator-approved config change and adopt the current config.
+
+        Appends a structured entry (with old+new values, so the original config stays
+        reconstructable) to run.config_resume_changes, mirrors it into decisions_log as
+        best-effort context, then updates config_snapshot to the current config and
+        re-persists the run snapshot.
+        """
+        self.run.config_resume_changes.append({
+            "resumed_at": _now(),
+            "changes": changes,
+        })
+        self.record_human_override("config_change_on_resume", json.dumps(changes))
+        self.run.config_snapshot = self._config.to_dict()
+        self._save_run_state()
+
+    def record_human_override(self, decision: str, rationale: str | None) -> None:
+        """Stage a human_override entry into decisions_log (flushed at commit).
+
+        Single builder for the decisions_log human_override shape, shared by the
+        config-change-on-resume path here and the operator-resolution path in the CLI,
+        so the entry schema and timestamp source can't drift between the two.
+        """
+        self.pending.merge_append("decisions_log", [{
+            "entry_id": str(uuid.uuid4()),
+            "run_id": self.run.run_id,
+            "entry_type": "human_override",
+            "source_agent": None,
+            "decision": decision,
+            "rationale": rationale,
+            "created_at": _now(),
+        }])
 
     # ------------------------------------------------------------------
     # Properties (convenience accessors with assertion)
@@ -323,6 +451,29 @@ class StateMachine:
         fragment = self._config.stack_profile.prompt_fragment(fragment_key)
         pkg.state_documents["_stack_guidance"] = fragment or ""
 
+    def _save_run_state(self) -> None:
+        """Persist the run snapshot to codeforge_run.json, first syncing the staged
+        pending-writes map onto the run.
+
+        The staging map lives in self._pending (in-memory); mirroring it onto
+        run.pending_writes before each snapshot makes it durable in run-logs (never
+        project-state/, so the commit-atomicity invariant holds) so an interrupted run
+        can rehydrate it on resume (see resume_run) and flush the complete project
+        state at commit. Also gives crash durability for free.
+
+        The mirror (a deepcopy of the whole staging map) runs only when the map actually
+        changed since the last snapshot. The hot path — _apply_outcome on every counter
+        / gate update — never touches the staging map, so it skips the deepcopy and reuses
+        the value already on the run.
+        """
+        if (
+            self._pending is not None
+            and self._run is not None
+            and self._pending.consume_dirty()
+        ):
+            self._run.pending_writes = self._pending.get_all_changed()
+        self.event_log.update_run_snapshot(self.run)
+
     def _apply_outcome(self, outcome: RoutingOutcome) -> None:
         """Apply counter deltas and resets from a routing outcome."""
         new_counters = apply_outcome(self.run.retry_counters, outcome)
@@ -337,7 +488,7 @@ class StateMachine:
             counter_resets=outcome.counter_resets,
             detail=outcome.detail,
         )
-        self.event_log.update_run_snapshot(self.run)
+        self._save_run_state()
 
     def _escalate(self, reason: EscalationReason, context: str = "") -> NoReturn:
         """Record escalation, update run status, raise EscalationError."""
@@ -351,7 +502,7 @@ class StateMachine:
         )
         self.run.escalations.append(event)
         self.run.status = "failed_escalated"
-        self.event_log.update_run_snapshot(self.run)
+        self._save_run_state()
         raise EscalationError(reason, context, phase=self._current_phase)
 
     # ------------------------------------------------------------------
@@ -789,7 +940,7 @@ class StateMachine:
                 agent_call_count=self.run.agent_call_count,
             )
 
-            if not gate_result.structural_passed:
+            if not gate_result.structural_passed or not gate_result.contract_passed:
                 reprompt = self._handle_structural_failure(
                     raw, "requirements_analyst", gate_result
                 )
@@ -1130,6 +1281,7 @@ class StateMachine:
                 assembly_id=pkg.assembly_id,
                 counters=self.run.retry_counters,
                 agent_call_count=self.run.agent_call_count,
+                requirements_doc=requirements_doc,
             )
 
             if not gate_result.structural_passed or not gate_result.contract_passed:
@@ -1458,7 +1610,7 @@ class StateMachine:
         # (_do_commit) actually lands. Marking success here would be premature: a
         # commit failure must leave the run as failed_escalated and resumable, not
         # falsely "succeeded".
-        self.event_log.update_run_snapshot(self.run)
+        self._save_run_state()
 
     # ------------------------------------------------------------------
     # Top-level orchestration
@@ -1487,6 +1639,26 @@ class StateMachine:
                 )
             prompts[aid] = p.read_text(encoding="utf-8")
         return prompts
+
+    def _require_resume_artifact(
+        self,
+        initial_state: str,
+        artifact_type: str,
+        model: Callable[..., _ArtifactModel],
+    ) -> _ArtifactModel:
+        """Load a producer artifact a resumed phase depends on, or raise a clear error.
+
+        A phase resumed past its producer needs that producer's artifact on disk. Raise
+        a contextual RuntimeError here rather than letting a bare `assert ... is not None`
+        fire deep in the phase loop with no context. The caller owns the gating set (which
+        initial_states require which artifact); this only does load-or-raise-or-parse.
+        """
+        data = self._load_artifact_output(artifact_type)
+        if data is None:
+            raise RuntimeError(
+                f"Cannot resume at {initial_state}: {artifact_type} artifact not found"
+            )
+        return model(**data)
 
     def _load_artifact_output(self, artifact_type: str) -> dict[str, Any] | None:
         """
@@ -1545,10 +1717,13 @@ class StateMachine:
                 req_data = req_data["requirements_doc"]
             req_doc = RequirementsDoc(**req_data)
 
+            # Required-artifact checks: a phase resumed past the producer needs that
+            # producer's artifact on disk. Raise a clear error here rather than letting
+            # a bare `assert ... is not None` fire deep in the phase loop with no context.
             if initial_state in ("coding", "code_review", "test_design", "test_execution", "commit"):
-                arch_data = self._load_artifact_output("architecture_doc")
-                if arch_data is not None:
-                    arch_doc = ArchitectureDoc(**arch_data)
+                arch_doc = self._require_resume_artifact(
+                    initial_state, "architecture_doc", ArchitectureDoc
+                )
 
             # "commit" re-entry skips the phase loop (mapped to "done" below) but still
             # needs code_art + test_suite for run_commit's closing asserts and the CLI's
@@ -1557,13 +1732,13 @@ class StateMachine:
             # resume so _run_impl_with_reviews never runs, leaving code_art=None. Without
             # it the subsequent test_execution asserts immediately with a blank error.
             if initial_state in ("test_design", "test_execution", "commit"):
-                code_data = self._load_artifact_output("code_artifact")
-                if code_data is not None:
-                    code_art = CodeArtifact(**code_data)
+                code_art = self._require_resume_artifact(
+                    initial_state, "code_artifact", CodeArtifact
+                )
             if initial_state in ("test_execution", "commit"):
-                suite_data = self._load_artifact_output("test_suite")
-                if suite_data is not None:
-                    test_suite = TestSuite(**suite_data)
+                test_suite = self._require_resume_artifact(
+                    initial_state, "test_suite", TestSuite
+                )
 
             # Map reentry_state names to the while-loop state labels
             _state_map = {
@@ -1856,8 +2031,15 @@ class StateMachine:
     # ------------------------------------------------------------------
 
     def mark_failed_terminal(self) -> None:
+        # Safe to call from an error handler before a run is fully constructed (e.g. an
+        # exception during start_run/resume_run, which assign self._run before the event
+        # log). With no run there is nothing to mark; with no event log there is nowhere
+        # to persist it — and self.event_log / _save_run_state would assert, masking the
+        # original exception with an AssertionError.
+        if self._run is None or self._event_log is None:
+            return
         self.run.status = "failed_terminal"
-        self.event_log.update_run_snapshot(self.run)
+        self._save_run_state()
 
 
 # ---------------------------------------------------------------------------

@@ -25,16 +25,21 @@ test_command: "npx --no-install vitest run --reporter=junit --outputFile=results
 results_path: "/workspace/results.xml"
 workdir: "/workspace"
 
-# Continuation staging: app/, components/, lib/, src/ trees plus root config/manifest files.
+# Continuation staging: app/, components/, lib/, hooks/, types/, utils/, src/ trees plus
+# root config/manifest files. The `@/` alias maps to the repo root, so any top-level source
+# dir the coder may import from must be staged or continuation builds fail to resolve it.
 source_globs:
   - "app/**"
   - "components/**"
   - "lib/**"
+  - "hooks/**"
+  - "types/**"
+  - "utils/**"
   - "src/**"
   - "public/**"
   - "package.json"
   - "tsconfig.json"
-  - "next.config.mjs"
+  - "next.config.*"
   - "vitest.config.ts"
 
 runtime_version_regex: "v(\\d+\\.\\d+\\.\\d+)"

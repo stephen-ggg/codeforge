@@ -15,21 +15,27 @@ import pytest
 from codeforge.config.config_loader import ConfigSnapshot
 from codeforge.orchestrator.gates import GateResult
 from codeforge.orchestrator.routing import (
+    route_block_flag,
     route_low_confidence,
+    route_test_analysis_code_bug,
     route_test_analysis_recoverable_error,
 )
 from codeforge.orchestrator.state_machine import (
+    ConfigChangedError,
     EscalationError,
+    SchemaVersionMismatchError,
     StateMachine,
     _build_dep_fix_context,
     _build_env_fix_context,
 )
 from codeforge.schemas.contracts import (
     AgentOutput,
+    CodeforgeRun,
     FailureAnalysis,
     Flag,
     LowConfidenceRePrompt,
     MalformedOutputRePrompt,
+    RetryCounters,
     TestAnalysis,
     TestRunnerResults,
 )
@@ -46,6 +52,200 @@ def _gate_events(run_log_dir: Path, run_id: str) -> list[dict[str, Any]]:
     path = run_log_dir / run_id / "events.jsonl"
     events = [json.loads(line) for line in path.read_text().splitlines()]
     return [e for e in events if e.get("event_type") == "gate"]
+
+
+def _persisted_run(config_snapshot: dict[str, Any]) -> CodeforgeRun:
+    return CodeforgeRun(
+        run_id="run-resume-test",
+        codeforge_version="codeforge-v1",
+        run_mode="new_project",
+        started_at="2026-06-15T00:00:00+00:00",
+        status="failed_escalated",  # type: ignore[arg-type]
+        config_snapshot=config_snapshot,
+        retry_counters=RetryCounters(),
+    )
+
+
+def test_reconcile_no_drift_is_silent(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    run = _persisted_run(minimal_config.to_dict())
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    sm.reconcile_config_on_resume(allow_config_change=False)
+    assert sm.run.config_resume_changes == []
+    gates = _gate_events(run_log_dir, run.run_id)
+    assert any(g["rule"] == "schema_version_match" and g["passed"] for g in gates)
+
+
+def test_reconcile_schema_mismatch_blocks_even_when_allowed(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    snap = minimal_config.to_dict()
+    snap["schema_version"] = "0.0.0-old"
+    run = _persisted_run(snap)
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    # allow_config_change must NOT override the schema gate.
+    with pytest.raises(SchemaVersionMismatchError):
+        sm.reconcile_config_on_resume(allow_config_change=True)
+    gates = _gate_events(run_log_dir, run.run_id)
+    assert any(g["rule"] == "schema_version_match" and not g["passed"] for g in gates)
+
+
+def test_reconcile_drift_blocks_without_optin(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    snap = minimal_config.to_dict()
+    original = snap["retry_limits"]["test_loop"]
+    snap["retry_limits"]["test_loop"] = original + 5
+    run = _persisted_run(snap)
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    with pytest.raises(ConfigChangedError) as exc_info:
+        sm.reconcile_config_on_resume(allow_config_change=False)
+    assert any(c["path"] == "retry_limits.test_loop" for c in exc_info.value.changes)
+    # Persisted snapshot left untouched, nothing recorded.
+    assert sm.run.config_snapshot["retry_limits"]["test_loop"] == original + 5
+    assert sm.run.config_resume_changes == []
+
+
+def test_reconcile_drift_recorded_with_flag(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    snap = minimal_config.to_dict()
+    original = snap["retry_limits"]["test_loop"]
+    snap["retry_limits"]["test_loop"] = original + 5
+    run = _persisted_run(snap)
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    sm.reconcile_config_on_resume(allow_config_change=True)
+    # Snapshot adopts the current config; the change is recorded with old+new.
+    assert sm.run.config_snapshot["retry_limits"]["test_loop"] == original
+    assert len(sm.run.config_resume_changes) == 1
+    recorded = sm.run.config_resume_changes[0]["changes"]
+    assert {"path": "retry_limits.test_loop", "old": original + 5, "new": original} in recorded
+
+
+def test_reconcile_drift_recorded_with_interactive_confirm(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    snap = minimal_config.to_dict()
+    snap["retry_limits"]["test_loop"] = snap["retry_limits"]["test_loop"] + 5
+    run = _persisted_run(snap)
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    sm.reconcile_config_on_resume(
+        allow_config_change=False, interactive_confirm=lambda changes: True
+    )
+    assert len(sm.run.config_resume_changes) == 1
+
+    # A declining callback blocks.
+    run2 = _persisted_run(snap)
+    sm2 = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm2.resume_run(run2)
+    with pytest.raises(ConfigChangedError):
+        sm2.reconcile_config_on_resume(
+            allow_config_change=False, interactive_confirm=lambda changes: False
+        )
+
+
+def test_escalate_persists_pending_writes(sm: StateMachine, run_log_dir: Path) -> None:
+    """Review finding #2: staged project-state writes must be persisted onto the run
+    snapshot so a resumed run can flush the complete project state at commit."""
+    sm.pending.set("architecture", {"schema_version": "1.0.0", "modules": []})
+    sm.pending.set(
+        "requirements_history",
+        {"feature_title": "X", "ui_design_component_ids": ["PhaseRail"]},
+    )
+    sm.pending.merge_append("decisions_log", [{"entry_id": "d1", "decision": "x"}])
+    sm._current_phase = "architecture"
+
+    with pytest.raises(EscalationError):
+        sm._escalate("max_retries_exceeded", "ctx")
+
+    data = json.loads(
+        (run_log_dir / sm.run.run_id / "codeforge_run.json").read_text()
+    )
+    pw = data["pending_writes"]
+    assert pw["architecture"] == {"schema_version": "1.0.0", "modules": []}
+    assert pw["requirements_history"]["ui_design_component_ids"] == ["PhaseRail"]
+    assert pw["decisions_log"]["entries"][0]["entry_id"] == "d1"
+
+
+def test_resume_run_rehydrates_pending_writes(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    run = _persisted_run(minimal_config.to_dict())
+    run.pending_writes = {
+        "architecture": {"schema_version": "1.0.0", "modules": []},
+        "requirements_history": {"feature_title": "X", "ui_design_component_ids": ["A"]},
+        "decisions_log": {"schema_version": "1.0.0", "entries": [{"entry_id": "d1"}]},
+    }
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    assert sm.pending.get("architecture") == {"schema_version": "1.0.0", "modules": []}
+    assert sm.pending.get("requirements_history")["ui_design_component_ids"] == ["A"]
+    assert sm.pending.get("decisions_log")["entries"][0]["entry_id"] == "d1"
+
+
+def test_resume_run_handles_absent_pending_writes(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    """A run persisted before this change (or with no staged writes) carries an empty
+    pending_writes map and must resume cleanly."""
+    run = _persisted_run(minimal_config.to_dict())
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.resume_run(run)
+    assert sm.pending.get("architecture") is None
+
+
+def test_resume_missing_required_artifact_raises_clear_error(
+    sm: StateMachine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding #4: a resume that needs an artifact the store doesn't have fails
+    with a clear RuntimeError, not a bare AssertionError deep in the phase loop."""
+    req = {
+        "run_id": "r",
+        "run_mode": "new_project",
+        "feature_title": "F",
+        "feature_description": "D",
+        "scope": {"in_scope": [], "explicitly_out_of_scope": []},
+        "acceptance_criteria": [],
+        "data_contracts": [],
+        "human_confirmed_decisions": [],
+    }
+    monkeypatch.setattr(StateMachine, "_load_prompts", lambda self: {})
+    monkeypatch.setattr(
+        StateMachine,
+        "_load_artifact_output",
+        lambda self, atype: req if atype == "requirements_doc" else None,
+    )
+    with pytest.raises(RuntimeError, match="architecture_doc"):
+        sm.execute("brief", None, initial_state="coding")
+
+
+def test_resume_missing_requirements_artifact_raises_clear_error(
+    sm: StateMachine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The requirements_doc itself is the first required artifact on any non-requirements
+    re-entry. If the store doesn't have it, resume must fail with a clear RuntimeError
+    naming requirements_doc — not a bare AssertionError deep in the phase loop."""
+    monkeypatch.setattr(StateMachine, "_load_prompts", lambda self: {})
+    monkeypatch.setattr(
+        StateMachine, "_load_artifact_output", lambda self, atype: None
+    )
+    with pytest.raises(RuntimeError, match="requirements_doc"):
+        sm.execute("brief", None, initial_state="coding")
+
+
+def test_mark_failed_terminal_noop_without_run(
+    minimal_config: ConfigSnapshot, project_dir: Path, run_log_dir: Path
+) -> None:
+    """Review finding #5: mark_failed_terminal must be safe to call from an error
+    handler before a run was started (e.g. an exception during start_run)."""
+    sm = StateMachine(minimal_config, project_dir, run_log_dir)
+    sm.mark_failed_terminal()  # _run is None — must not raise
 
 
 def test_start_run_initialises_components(sm: StateMachine) -> None:
@@ -140,11 +340,16 @@ def test_block_flag_persists_links_and_enriches(sm: StateMachine, run_log_dir: P
     output = _block_output(summary)
     gr = _block_gate_result(output)
 
+    counters_before = sm.run.retry_counters.model_copy(deep=True)
+
     with pytest.raises(EscalationError) as exc:
         sm._handle_policy_escalation(
-            gr, "test_analyst", "test_analysis", route_low_confidence("test_analyst")
+            gr, "test_analyst", "test_analysis", route_block_flag()
         )
     assert exc.value.reason == "block_flag"
+
+    # "No retry" contract: a block flag halts immediately — no counter is touched.
+    assert sm.run.retry_counters == counters_before
 
     # Gate event is self-sufficient and linked to a real artifact id.
     gate = _gate_events(run_log_dir, sm.run.run_id)[-1]
@@ -371,6 +576,38 @@ def test_contract_failure_persists_output_to_failed_artifacts(
     assert not (run_dir / "artifacts" / f"{artifact_id}.json").exists()
 
 
+def test_requirements_contract_failure_is_not_accepted_as_success(
+    sm: StateMachine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schema-valid but contract-violating requirements output must route through the
+    re-prompt/escalate path — not fall through both guards and be accepted as a valid
+    doc. Regression: run_requirements had no contract_passed branch, so a contract
+    failure (which leaves policy_passed defaulting True) was silently treated as success."""
+    import types
+    from codeforge.agents.requirements_analyst import RequirementsAnalystAgent
+
+    fake_pkg = types.SimpleNamespace(state_documents={}, assembly_id="asm-1")
+    monkeypatch.setattr(sm.assembler, "assemble", lambda *a, **k: fake_pkg)
+    monkeypatch.setattr(
+        RequirementsAnalystAgent, "build_user_turn", lambda self, pkg, reprompt: "turn"
+    )
+    monkeypatch.setattr(sm, "_invoke_agent", lambda *a, **k: '{"status": "complete"}')
+
+    gr = GateResult()
+    gr.contract_passed = False  # structural_passed/policy_passed stay True
+    monkeypatch.setattr(sm.gates, "evaluate", lambda **k: gr)
+
+    # Exhaust the shared malformed budget so the contract failure escalates (via
+    # route_malformed) rather than looping forever on re-prompts.
+    limit = sm._config.to_dict().get("retry_limits", {}).get("malformed_output_retries", 2)
+    sm.run.retry_counters = sm.run.retry_counters.model_copy(
+        update={"malformed_output": limit}
+    )
+
+    with pytest.raises(EscalationError):
+        sm.run_requirements("brief", object(), "system prompt")
+
+
 def test_format_policy_detail_without_summary(sm: StateMachine) -> None:
     """Payloads lacking a summary degrade gracefully — no crash, segment omitted."""
     output = AgentOutput(
@@ -521,3 +758,33 @@ def test_runtime_dep_error_recovers_to_coding_with_dep_context(sm: StateMachine)
     ctx = _build_dep_fix_context(runner_results)
     assert ctx["trigger"] == "runtime_dep_error"
     assert "leftpad" in ctx["stderr_tail"]
+
+
+def test_apply_outcome_zeroes_reset_counters_and_keeps_others(sm: StateMachine) -> None:
+    """The counter_resets on a test_analysis routing outcome must actually ZERO those
+    counters on the run when applied — not merely be present in the directive. A counter
+    not named in the resets (and not in the deltas) is left untouched."""
+    sm.run.retry_counters = RetryCounters(
+        coder_low_confidence_reprompt=1,
+        code_review_loop=2,
+        security_review_loop=1,
+        malformed_output=2,
+        truncation_retry=1,
+        infrastructure=3,   # NOT reset by code_bug — must survive
+        test_loop=0,
+    )
+
+    outcome = route_test_analysis_code_bug(sm.run.retry_counters, sm._config.to_dict())
+    sm._apply_outcome(outcome)
+
+    c = sm.run.retry_counters
+    # Everything named in counter_resets is now zero.
+    assert c.coder_low_confidence_reprompt == 0
+    assert c.code_review_loop == 0
+    assert c.security_review_loop == 0
+    assert c.malformed_output == 0
+    assert c.truncation_retry == 0
+    # The delta still applies (one test cycle consumed) …
+    assert c.test_loop == 1
+    # … and an unrelated counter is preserved.
+    assert c.infrastructure == 3

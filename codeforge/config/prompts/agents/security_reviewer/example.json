@@ -4,16 +4,16 @@
     "summary": "Pure integer-summation function with no I/O, no external input surface beyond a typed list, and no dependencies. No exploitable security issues found.",
     "findings": [],
     "checklist": [
-      { "category": "SQL / command injection", "assessed": true, "result": "not_applicable", "notes": "No database, shell, or query construction." },
-      { "category": "Secrets and credentials in code", "assessed": true, "result": "clean", "notes": "No secrets, keys, or credentials present." },
-      { "category": "Input validation and sanitisation", "assessed": true, "result": "clean", "notes": "Input type is validated; non-integer elements raise TypeError." },
-      { "category": "Authentication and session management", "assessed": true, "result": "not_applicable", "notes": "No authentication surface." },
-      { "category": "Authorisation and access control", "assessed": true, "result": "not_applicable", "notes": "No protected resources or access decisions." },
-      { "category": "Dependency vulnerabilities", "assessed": true, "result": "clean", "notes": "requirements.txt is empty; no third-party dependencies to assess." },
-      { "category": "Sensitive data exposure", "assessed": true, "result": "not_applicable", "notes": "No PII, logging, or persistence." },
-      { "category": "Cross-site scripting", "assessed": true, "result": "not_applicable", "notes": "No HTTP endpoint or rendered output." },
-      { "category": "Insecure direct object references", "assessed": true, "result": "not_applicable", "notes": "No object lookup by identifier." },
-      { "category": "Error handling and information leakage", "assessed": true, "result": "clean", "notes": "TypeError messages are generic and reveal no internal state." }
+      { "category": "injection", "assessed": true, "result": "not_applicable", "notes": "No database, shell, or query construction." },
+      { "category": "secrets", "assessed": true, "result": "clean", "notes": "No secrets, keys, or credentials present." },
+      { "category": "input_validation", "assessed": true, "result": "clean", "notes": "Input type is validated; non-integer elements raise TypeError." },
+      { "category": "authentication", "assessed": true, "result": "not_applicable", "notes": "No authentication surface." },
+      { "category": "authorisation", "assessed": true, "result": "not_applicable", "notes": "No protected resources or access decisions." },
+      { "category": "dependency_vulnerabilities", "assessed": true, "result": "clean", "notes": "requirements.txt is empty; no third-party dependencies to assess." },
+      { "category": "sensitive_data_exposure", "assessed": true, "result": "not_applicable", "notes": "No PII, logging, or persistence." },
+      { "category": "xss", "assessed": true, "result": "not_applicable", "notes": "No HTTP endpoint or rendered output." },
+      { "category": "insecure_direct_object_references", "assessed": true, "result": "not_applicable", "notes": "No object lookup by identifier." },
+      { "category": "error_handling", "assessed": true, "result": "clean", "notes": "TypeError messages are generic and reveal no internal state." }
     ]
   },
   "assumptions_made": [],

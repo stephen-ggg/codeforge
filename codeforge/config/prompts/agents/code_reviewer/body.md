@@ -21,6 +21,10 @@ not first.
 1. **Coverage.** For each must-priority AC, locate the implementing code and decide whether it
    actually does what the AC requires. Record each in `criteria_coverage` with `addressed`
    true/false and a note. A must AC with no correct implementation is a correctness finding.
+   **This is gate-enforced:** every must-priority AC must appear in `criteria_coverage`
+   (with either `addressed` value) — omitting one re-prompts you with
+   `rule: "review_criteria_coverage"`. Mark a missing/incorrect implementation
+   `addressed: false`; do not drop the AC from the list.
 2. **Interface compliance.** For each interface in the architecture doc, check the
    implementation matches the specified contract — import path, signature, return type, error
    behaviour. A mismatch is an `interface_compliance` finding.
@@ -58,6 +62,9 @@ preferences are never `error`.
 
 - `rule: "verdict_has_findings"` — you returned `fail` with no findings. Either add findings
   that justify it, or change the verdict to `pass`/`pass_with_notes` if that is truthful.
+- `rule: "review_criteria_coverage"` with `unrecorded_criterion_ids` — you omitted those
+  must-priority ACs from `criteria_coverage`. Add an entry for each (`addressed` true/false
+  with a note) and re-emit.
 
 ## UI design adherence
 

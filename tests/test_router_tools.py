@@ -142,6 +142,52 @@ def test_streaming_marks_truncated_on_length(monkeypatch, minimal_config: Config
     assert result.truncated is True
 
 
+def test_streaming_missing_finish_reason_marks_truncated(monkeypatch, minimal_config: ConfigSnapshot) -> None:
+    """A stream cut after ≥1 chunk that ends WITHOUT a terminal finish_reason (None)
+    is partial — it must be flagged truncated even though the provider never said
+    'length'. Otherwise a network-cut response masquerades as complete."""
+    chunks = [
+        _chunk(content='{"output": {"ok": true}, "confidence": 0.9}'),
+        _chunk(finish_reason=None, call_id="resp-cut"),
+    ]
+    monkeypatch.setattr(router_mod.litellm, "completion", lambda **kw: iter(chunks))
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
+
+    assert result.truncated is True
+
+
+def test_streaming_truncated_does_not_salvage_quoted_envelope(
+    monkeypatch, minimal_config: ConfigSnapshot
+) -> None:
+    """The dangerous case: reasoning quotes a complete envelope-shaped object, then the
+    REAL final output is cut off mid-JSON. A truncated response must not return the
+    salvaged earlier object as if it were clean — content must fail structural parse so
+    the orchestrator routes it through the truncation path."""
+    quoted = (
+        '{"output": {"example": 1}, "assumptions_made": [], '
+        '"confidence": 0.5, "unresolved_flags": []}'
+    )
+    chunks = [
+        _chunk(content=f"Here is the schema I will follow: {quoted}\nNow the answer: "),
+        _chunk(content='{"output": {"real": tru'),   # cut off mid-token
+        _chunk(finish_reason="length", call_id="resp-trunc2"),
+    ]
+    monkeypatch.setattr(router_mod.litellm, "completion", lambda **kw: iter(chunks))
+
+    router = ModelRouter(minimal_config)
+    result = router.complete(agent_id="test_analyst", system_prompt="s", user_turn="u", run_id="r")
+
+    assert result.truncated is True
+    # The salvaged quoted envelope must NOT be returned as the clean answer.
+    assert result.content != quoted
+    # Content does not parse as a single JSON object → structural gate rejects it.
+    import json as _json
+    with pytest.raises(_json.JSONDecodeError):
+        _json.loads(result.content)
+
+
 def test_streaming_skipped_when_tools_present(monkeypatch, minimal_config: ConfigSnapshot) -> None:
     # A streaming agent invoked with tools must NOT stream (tool_calls fragment
     # across chunks); it falls back to the non-streaming tool loop.

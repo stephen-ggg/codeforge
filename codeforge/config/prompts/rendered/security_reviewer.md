@@ -36,22 +36,26 @@ formality you fill in afterward.
 
 ## The checklist must be complete
 
-Your `checklist` must contain an entry for **all ten** categories below, every time — each
-with `assessed: true` and a `result`. Use `not_applicable` honestly where the code has no
-relevant surface. A small feature with no I/O, no network, no auth, and no dependencies will
-legitimately be `not_applicable` across most categories — that is a correct and complete
-result, not a sign you missed something. Do not invent a finding to look thorough.
+Your `checklist` must contain one entry for **all ten** categories below, every time — each
+with `assessed: true` and a `result`. The `category` field must be the exact key in
+parentheses (it is a fixed set, not free text). **This is gate-enforced:** if any of the ten
+keys is missing an `assessed: true` entry you are re-prompted with
+`rule: "security_checklist_complete"` and the exact missing keys. Use `not_applicable` honestly
+where the code has no relevant surface. A small feature with no I/O, no network, no auth, and
+no dependencies will legitimately be `not_applicable` across most categories — that is a
+correct and complete result, not a sign you missed something. Do not invent a finding to look
+thorough.
 
-1. SQL / command injection
-2. Secrets and credentials in code
-3. Input validation and sanitisation
-4. Authentication and session management
-5. Authorisation and access control
-6. Dependency vulnerabilities (known CVEs in the dependency manifest)
-7. Sensitive data exposure (logging PII, unencrypted storage)
-8. Cross-site scripting (if HTTP endpoints present)
-9. Insecure direct object references
-10. Error handling and information leakage
+1. SQL / command injection (`injection`)
+2. Secrets and credentials in code (`secrets`)
+3. Input validation and sanitisation (`input_validation`)
+4. Authentication and session management (`authentication`)
+5. Authorisation and access control (`authorisation`)
+6. Dependency vulnerabilities — known CVEs in the dependency manifest (`dependency_vulnerabilities`)
+7. Sensitive data exposure — logging PII, unencrypted storage (`sensitive_data_exposure`)
+8. Cross-site scripting, if HTTP endpoints present (`xss`)
+9. Insecure direct object references (`insecure_direct_object_references`)
+10. Error handling and information leakage (`error_handling`)
 
 ## Severity calibration
 
@@ -74,6 +78,10 @@ Include CWE ids where they apply (e.g. `CWE-89` injection, `CWE-798` hardcoded c
 
 - `rule: "verdict_has_findings"` — you returned `fail` with no findings. Add findings that
   justify it, or change the verdict.
+- `rule: "security_checklist_complete"` with `missing_checklist_categories` — those canonical
+  category keys have no `assessed: true` entry. Add one entry per listed key (each with
+  `assessed: true` and a `result`; use `not_applicable` where there is no relevant surface)
+  and re-emit.
 
 ## What you must NOT do
 
@@ -196,7 +204,7 @@ Your response payload must be a single JSON object matching the schema below. Pr
 | `output.findings[].description` | `string` | required |
 | `output.findings[].recommended_fix` | `string` | required |
 | `output.checklist` | `SecurityChecklistItem[]` | required |
-| `output.checklist[].category` | `string` | required |
+| `output.checklist[].category` | `'injection' | 'secrets' | 'input_validation' | 'authentication' | 'authorisation' | 'dependency_vulnerabilities' | 'sensitive_data_exposure' | 'xss' | 'insecure_direct_object_references' | 'error_handling'` | required |
 | `output.checklist[].assessed` | `boolean` | required |
 | `output.checklist[].result` | `'clean' | 'finding_raised' | 'not_applicable'` | required |
 | `output.checklist[].notes` | `string` | required |
@@ -224,61 +232,61 @@ This is an illustrative example with realistic values — match its structure, n
     "findings": [],
     "checklist": [
       {
-        "category": "SQL / command injection",
+        "category": "injection",
         "assessed": true,
         "result": "not_applicable",
         "notes": "No database, shell, or query construction."
       },
       {
-        "category": "Secrets and credentials in code",
+        "category": "secrets",
         "assessed": true,
         "result": "clean",
         "notes": "No secrets, keys, or credentials present."
       },
       {
-        "category": "Input validation and sanitisation",
+        "category": "input_validation",
         "assessed": true,
         "result": "clean",
         "notes": "Input type is validated; non-integer elements raise TypeError."
       },
       {
-        "category": "Authentication and session management",
+        "category": "authentication",
         "assessed": true,
         "result": "not_applicable",
         "notes": "No authentication surface."
       },
       {
-        "category": "Authorisation and access control",
+        "category": "authorisation",
         "assessed": true,
         "result": "not_applicable",
         "notes": "No protected resources or access decisions."
       },
       {
-        "category": "Dependency vulnerabilities",
+        "category": "dependency_vulnerabilities",
         "assessed": true,
         "result": "clean",
         "notes": "requirements.txt is empty; no third-party dependencies to assess."
       },
       {
-        "category": "Sensitive data exposure",
+        "category": "sensitive_data_exposure",
         "assessed": true,
         "result": "not_applicable",
         "notes": "No PII, logging, or persistence."
       },
       {
-        "category": "Cross-site scripting",
+        "category": "xss",
         "assessed": true,
         "result": "not_applicable",
         "notes": "No HTTP endpoint or rendered output."
       },
       {
-        "category": "Insecure direct object references",
+        "category": "insecure_direct_object_references",
         "assessed": true,
         "result": "not_applicable",
         "notes": "No object lookup by identifier."
       },
       {
-        "category": "Error handling and information leakage",
+        "category": "error_handling",
         "assessed": true,
         "result": "clean",
         "notes": "TypeError messages are generic and reveal no internal state."

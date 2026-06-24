@@ -137,6 +137,9 @@ GateRule = Literal[
     "ac_coverage_must",
     "arch_criteria_coverage",
     "coverage_map_valid",
+    "review_criteria_coverage",
+    "security_checklist_complete",
+    "coverage_update_present",
     "unique_test_paths",
     "requirements_txt_present",
     "package_json_dev_script",
@@ -304,6 +307,8 @@ class ContractViolationRePrompt(BaseModel):
     uncovered_ac_ids: list[str] | None = None
     unaddressed_ac_ids: list[str] | None = None
     mismatched_criterion_ids: list[str] | None = None
+    unrecorded_criterion_ids: list[str] | None = None
+    missing_checklist_categories: list[str] | None = None
     findings_missing_for_verdict: str | None = None
     missing_spec_gap_for: list[str] | None = None
     missing_requirements_txt: bool | None = None
@@ -726,8 +731,27 @@ CodeReviewerOutput = AgentOutput[ReviewReport]
 # 2.5 Security Reviewer
 # ---------------------------------------------------------------------------
 
+# The ten fixed security-review categories. Canonical keys (not free text) so the
+# security_checklist_complete gate can assert the checklist covers exactly this set by
+# identity rather than counting distinct free-form phrases (which a model can game with
+# ten rephrasings of one category). The security_reviewer prompt maps each numbered
+# category to its key; keep the two in sync.
+SecurityChecklistCategory = Literal[
+    "injection",                          # 1. SQL / command injection
+    "secrets",                            # 2. Secrets and credentials in code
+    "input_validation",                   # 3. Input validation and sanitisation
+    "authentication",                     # 4. Authentication and session management
+    "authorisation",                      # 5. Authorisation and access control
+    "dependency_vulnerabilities",         # 6. Dependency vulnerabilities (known CVEs)
+    "sensitive_data_exposure",            # 7. Sensitive data exposure (PII, unencrypted)
+    "xss",                                # 8. Cross-site scripting
+    "insecure_direct_object_references",  # 9. Insecure direct object references
+    "error_handling",                     # 10. Error handling and information leakage
+]
+
+
 class SecurityChecklistItem(BaseModel):
-    category: str
+    category: SecurityChecklistCategory
     assessed: bool
     result: Literal["clean", "finding_raised", "not_applicable"]
     notes: str
@@ -954,11 +978,20 @@ class CodeforgeRun(BaseModel):
     retry_counters: RetryCounters
     agent_call_count: int = 0
 
-    # In-memory pending writes — not persisted mid-run
+    # Durable snapshot of the orchestrator's staged project-state writes, mirrored here
+    # by StateMachine._save_run_state before each run-snapshot write. Persisted to
+    # codeforge_run.json (never project-state/, preserving commit-atomicity) so an
+    # interrupted run can rehydrate its staging map on resume. {} until the first stage.
     pending_writes: dict[str, Any] = Field(default_factory=dict)
 
     artifacts: dict[str, ArtifactRef | None] = Field(default_factory=dict)
     escalations: list[EscalationEvent] = Field(default_factory=list)
+
+    # Audit trail of config changes accepted on resume. Each entry:
+    # {"resumed_at": iso, "changes": [{"path": ..., "old": ..., "new": ...}, ...]}.
+    # Because each entry carries old+new, the original config values stay
+    # reconstructable even though config_snapshot is updated to the latest config.
+    config_resume_changes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ===========================================================================

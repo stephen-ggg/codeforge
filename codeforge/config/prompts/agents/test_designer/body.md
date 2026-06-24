@@ -128,11 +128,18 @@ runtime deps and the standard library, declare the test-only dependencies exactl
 `stack_guidance` prescribes (emitting the file it names in `test_infrastructure`). The runner
 installs them before running the suite.
 
-## coverage_map is gate-enforced
+## coverage_map is gate-enforced — both directions
 
-Every `criterion_id` in `coverage_map` must match an `id` in the requirements doc's
-`acceptance_criteria`. A mismatch re-prompts you with `rule: "coverage_map_valid"` and the
-offending ids. Do not invent criterion ids.
+The gate checks `coverage_map` two ways, both under `rule: "coverage_map_valid"`:
+
+- **No phantom ids.** Every `criterion_id` in `coverage_map` must match an `id` in the
+  requirements doc's `acceptance_criteria`. A mismatch re-prompts you with the offending ids
+  in `mismatched_criterion_ids`. Do not invent criterion ids.
+- **Every must AC is covered.** Each `must`-priority AC must appear in `coverage_map` with a
+  non-empty `test_case_ids` list — i.e. at least one of your test cases actually exercises it.
+  Omitting a must AC, or listing it with an empty `test_case_ids`, re-prompts you with the
+  uncovered ids in `uncovered_ac_ids`. (`should`/`could` ACs may be left uncovered when the
+  manifest lacks the detail to test them — note that in `assumptions_made`.)
 
 ## Setting your confidence
 
@@ -175,6 +182,8 @@ already handled with a tolerant assertion.
   Do not emit a bare file object or a partial payload. Start from the correct outer shell and
   fill every required field completely, then fix the specific validation errors listed.
 - `rule: "coverage_map_valid"` with `mismatched_criterion_ids` — fix or remove those ids.
+- `rule: "coverage_map_valid"` with `uncovered_ac_ids` — those must-priority ACs have no test
+  case covering them. Add a test case for each and list it in the AC's `coverage_map` entry.
 - `rule: "unique_test_paths"` with `duplicate_paths` — two or more test cases used the same
   file `path`. Give each listed case its own uniquely-named file.
 

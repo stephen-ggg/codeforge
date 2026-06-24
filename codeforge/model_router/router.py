@@ -87,6 +87,14 @@ _SCRATCHPAD_INSTRUCTION = (
 _MAX_ATTEMPTS: int = 5
 _BACKOFF_BASE: float = 2.0
 
+# finish_reason values that mark a genuinely complete response. A streamed response
+# that ends without one of these (None, "length", a provider cut marker) was cut off
+# — network drop after the first chunk, or a max_tokens stop — and its text must be
+# treated as partial rather than salvaged into a clean-looking envelope.
+_COMPLETE_FINISH_REASONS: frozenset[str] = frozenset({
+    "stop", "end_turn", "tool_calls", "tool_use", "function_call",
+})
+
 # The four top-level keys every agent's output envelope carries (mirrors
 # schemas.contracts.AgentOutput). Used only to disambiguate which parsed object is
 # the envelope when a response contains more than one JSON object — e.g. the model
@@ -272,20 +280,18 @@ class ModelRouter:
 
             # Fallback: thinking availability is recomputed for the fallback model.
             fb_native = want_thinking and _supports_native_thinking(agent_config.fallback_model)
-            fb_messages = messages
             fb_thinking = (
                 {"type": "enabled", "budget_tokens": thinking_cfg.budget_tokens}
                 if fb_native and thinking_cfg is not None else None
             )
-            if want_thinking and not fb_native and not native:
-                # already added scratchpad; leave as-is
-                pass
-            elif want_thinking and not fb_native and native:
-                # primary was native (no scratchpad) but fallback isn't — add it now
-                fb_messages = [
-                    messages[0],
-                    {"role": "user", "content": user_turn + _SCRATCHPAD_INSTRUCTION},
-                ]
+            # Rebuild the fallback user turn from the clean prompt so the scratchpad
+            # instruction is present iff the FALLBACK needs it (thinking wanted but not
+            # native). Reusing the primary `messages` would either leak the primary's
+            # scratchpad into a native-thinking fallback (a real thinking block PLUS a
+            # contradictory "reason in plain text" instruction) or omit it when only the
+            # fallback is non-native.
+            fb_user = user_turn + _SCRATCHPAD_INSTRUCTION if (want_thinking and not fb_native) else user_turn
+            fb_messages = [messages[0], {"role": "user", "content": fb_user}]
 
             logger.info("Retrying agent '%s' with fallback '%s'", agent_id, agent_config.fallback_model)
             try:
@@ -299,6 +305,7 @@ class ModelRouter:
                     thinking_param=fb_thinking,
                     tools=tools,
                     tool_executor=tool_executor,
+                    allow_streaming=False,
                 )
             except Exception as fallback_exc:
                 logger.error(
@@ -320,6 +327,7 @@ class ModelRouter:
         thinking_param: dict[str, Any] | None = None,
         tools: list[dict[str, Any]] | None = None,
         tool_executor: Any | None = None,
+        allow_streaming: bool = True,
     ) -> RouterResult:
         """Single completion, or a read-only tool loop when tools are supplied."""
         kwargs = self._build_kwargs(model, messages, temperature, max_tokens, metadata, thinking_param, self._config.anthropic_api_key)
@@ -329,10 +337,10 @@ class ModelRouter:
 
         # Streaming lifts the connection-timeout ceiling on long responses. It is
         # skipped when tools are present (tool_call objects arrive fragmented across
-        # chunks and need reassembly) and on the fallback path (reliability over
-        # token ceiling — see complete(), which never sets streaming for fallback).
+        # chunks and need reassembly) and on the fallback path (allow_streaming=False:
+        # reliability over token ceiling — complete() disables it for the fallback).
         agent_config = self._config.agents.get(agent_id)
-        if not tools and getattr(agent_config, "streaming", False):
+        if allow_streaming and not tools and getattr(agent_config, "streaming", False):
             return self._stream_completion(kwargs, model, agent_id)
 
         response = _with_backoff(
@@ -354,14 +362,19 @@ class ModelRouter:
         thinking_chunks: list[str] = []
         text_chunks: list[str] = []
         last_chunk: Any = None
+        last_finish_reason: str | None = None
 
         for attempt in range(_MAX_ATTEMPTS):
             thinking_chunks = []
             text_chunks = []
             last_chunk = None
+            last_finish_reason = None
             try:
                 for chunk in litellm.completion(**kwargs, stream=True):
                     last_chunk = chunk
+                    fr = getattr(chunk.choices[0], "finish_reason", None)
+                    if fr is not None:
+                        last_finish_reason = fr
                     delta = chunk.choices[0].delta
                     rc = getattr(delta, "reasoning_content", None)
                     if rc:
@@ -394,13 +407,20 @@ class ModelRouter:
 
         thinking = "".join(thinking_chunks) or None
         text = "".join(text_chunks)
-        json_text = self._extract_json(text)
 
-        finish_reason = (
-            getattr(last_chunk.choices[0], "finish_reason", None)
-            if last_chunk is not None else None
-        )
-        truncated = finish_reason == "length"
+        # A genuinely complete stream settles on a recognised stop reason on some chunk.
+        # A provider may then emit a trailing usage-only chunk whose finish_reason is
+        # None, so we key off the last NON-None reason seen across the stream rather than
+        # only the final chunk's — otherwise a complete response gets misread as truncated.
+        # A real connection cut never delivers a stop reason (stays None) and "length" is
+        # an explicit cut, so both correctly fall through to truncated. require_complete_tail
+        # then refuses to salvage an earlier complete object (e.g. a JSON example quoted in
+        # the reasoning) as the final answer, so a truncated stream fails structural
+        # validation and is routed through the truncation path instead of masquerading as a
+        # clean envelope.
+        finish_reason = last_finish_reason
+        truncated = finish_reason not in _COMPLETE_FINISH_REASONS
+        json_text = self._extract_json(text, require_complete_tail=truncated)
 
         # On streaming, _hidden_params on the last chunk does not carry
         # litellm_call_id; _call_id falls back to the provider response id (chunk.id),
@@ -589,9 +609,11 @@ class ModelRouter:
         message = choice.message
         raw_content = getattr(message, "content", None)
         text, thinking = self._extract_content(raw_content, message)
-        json_text = self._extract_json(text)
 
         truncated = getattr(choice, "finish_reason", None) == "length"
+        # On a truncated (max_tokens) response, don't salvage an earlier complete
+        # object from the reasoning — force structural failure so it routes as truncated.
+        json_text = self._extract_json(text, require_complete_tail=truncated)
 
         litellm_call_id = self._call_id(response)
         usage = self._usage(response)
@@ -646,7 +668,7 @@ class ModelRouter:
         return (raw_content or ""), attr_thinking
 
     @staticmethod
-    def _extract_json(text: str) -> str:
+    def _extract_json(text: str, require_complete_tail: bool = False) -> str:
         """Return the JSON envelope object embedded in a model response.
 
         The response contract is: free-text reasoning first, then a single JSON
@@ -668,6 +690,13 @@ class ModelRouter:
 
         Returns the stripped text unchanged when nothing parses, so the schema_valid
         gate rejects it as malformed with a useful error.
+
+        require_complete_tail: set when the response was truncated. In that mode only an
+        object that runs to the very end of the text is eligible — a complete object
+        with content trailing after it was quoted in the reasoning, not the (cut-off)
+        final output, and salvaging it would let a truncated response masquerade as a
+        clean envelope. If nothing reaches the tail, the raw text is returned so the
+        gate fails it structurally and the orchestrator routes it as truncated.
         """
         s = text.strip()
         if s.startswith("```"):
@@ -686,7 +715,19 @@ class ModelRouter:
                 # unterminated fragment) — try the next `{`.
                 start = s.find("{", start + 1)
                 continue
-            if isinstance(obj, dict):
+            # When the response was truncated, only an object that ends the text can be
+            # the genuine final answer; reject anything with trailing content. A bare
+            # closing code fence is the exception — models commonly wrap the final
+            # envelope in ```json … ``` without the opening fence at position 0 (so the
+            # leading-fence strip above misses it), leaving a trailing ``` that is
+            # formatting, not a sign the object was quoted mid-reasoning.
+            tail = s[end:]
+            eligible = (
+                not require_complete_tail
+                or not tail.strip()
+                or re.fullmatch(r"\s*```\s*", tail) is not None
+            )
+            if isinstance(obj, dict) and eligible:
                 segment = s[start:end]
                 last_object = segment
                 if _ENVELOPE_KEYS.issubset(obj.keys()):

@@ -9,11 +9,12 @@ never blow up the model's context.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from codeforge.tools.jail import resolve_safe
+from codeforge.tools.jail import JailError, resolve_safe
 
 _MAX_FILE_BYTES = 1_000_000
 _MAX_MATCHES = 200
@@ -40,13 +41,38 @@ def _is_text(path: Path) -> bool:
 
 
 def _iter_files(root: Path):
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root)
-        if any(part in _SKIP_DIRS for part in rel.parts):
-            continue
-        yield path
+    """Yield jailed, text-candidate files under root.
+
+    search_code/find_references do not pass their results through resolve_safe the
+    way read_file/list_dir do, so traversal must enforce the jail itself or they
+    become a bypass. Two safeguards:
+      * os.walk(followlinks=False) never descends into a symlinked directory (so a
+        dir symlink pointing outside the repo can't be walked, and symlink loops
+        can't hang the scan), and
+      * every candidate file is run back through resolve_safe, which skips symlinked
+        *files* that escape the root and denied locations (.env, .git, project-state…)
+        — the exact set read_file refuses.
+    """
+    root = Path(root)
+    # Resolve the (constant) root once; resolve_safe reuses it per file instead of
+    # re-resolving it on every call.
+    root_resolved = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        # Prune skip dirs in place so os.walk never descends into them — which is the
+        # only guard needed (the previous per-file rel.parts re-check could never fire,
+        # since os.walk never visits a file inside a pruned dir).
+        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        for name in sorted(filenames):
+            path = Path(dirpath) / name
+            rel = path.relative_to(root)
+            try:
+                # Resolves symlinks and rejects escapes / denied locations (e.g. .env).
+                resolve_safe(root, rel.as_posix(), root_resolved=root_resolved)
+            except JailError:
+                continue
+            if not path.is_file():
+                continue
+            yield path
 
 
 def search_code(root: Path | str, query: str, glob: str | None = None) -> ToolOutput:
@@ -121,13 +147,20 @@ def read_file(
 
 def list_dir(root: Path | str, path: str = ".") -> ToolOutput:
     """List the entries of a directory (directories suffixed with '/')."""
-    target = resolve_safe(root, path)  # raises JailError on escape/denied
+    root_resolved = Path(root).resolve()
+    target = resolve_safe(root, path, root_resolved=root_resolved)  # raises on escape/denied
     if not target.exists() or not target.is_dir():
         return ToolOutput(f"directory not found: {path}", "not found")
 
     entries: list[str] = []
     for child in sorted(target.iterdir()):
         if child.name in _SKIP_DIRS:
+            continue
+        try:
+            # Skip denied locations (.env) and symlinks escaping the root, so the
+            # listing can't even reveal the name of something read_file would refuse.
+            resolve_safe(root, str(child), root_resolved=root_resolved)
+        except JailError:
             continue
         entries.append(child.name + ("/" if child.is_dir() else ""))
     return ToolOutput("\n".join(entries) or "(empty)", f"{len(entries)} entr(ies)")

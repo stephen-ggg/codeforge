@@ -54,6 +54,15 @@ def test_jail_rejects_denied_locations(repo: Path, denied: str) -> None:
         resolve_safe(repo, denied)
 
 
+def test_jail_rejects_symlink_escape(repo: Path) -> None:
+    """resolve_safe() resolves symlinks (Path.resolve), so an in-repo symlink pointing
+    outside the root must be refused — otherwise a symlink would be a jail bypass.
+    The symlink targets /etc (definitively outside the repo root)."""
+    (repo / "escape").symlink_to("/etc")
+    with pytest.raises(JailError):
+        resolve_safe(repo, "escape/passwd")
+
+
 # --------------------------------------------------------------------------- #
 # Read-only functions
 # --------------------------------------------------------------------------- #
@@ -73,6 +82,34 @@ def test_read_file_with_range(repo: Path) -> None:
 def test_list_dir_skips_nothing_visible(repo: Path) -> None:
     out = list_dir(repo, "src")
     assert "calc.py" in out.content
+
+
+def test_search_code_does_not_leak_env_files(repo: Path) -> None:
+    """search_code bypasses resolve_safe, so the jail must be enforced during
+    traversal — a secret in .env that read_file refuses must not surface in a search."""
+    out = search_code(repo, r"SECRET")
+    assert "abc123" not in out.content
+    assert ".env" not in out.content
+    assert out.content == "(no matches)"
+
+
+def test_search_code_does_not_follow_symlink_escape(repo: Path, tmp_path: Path) -> None:
+    """A symlink inside the repo pointing outside the root must not let search_code
+    read the target — neither a symlinked file nor a symlinked directory."""
+    secret = tmp_path.parent / "outside_secret.txt"
+    secret.write_text("TOPSECRET_TOKEN")
+    (repo / "link.py").symlink_to(secret)            # symlinked file escaping root
+    (repo / "outdir").symlink_to(tmp_path.parent)    # symlinked dir escaping root
+
+    out = search_code(repo, r"TOPSECRET_TOKEN")
+    assert "TOPSECRET_TOKEN" not in out.content
+    assert out.content == "(no matches)"
+
+
+def test_list_dir_hides_env_file(repo: Path) -> None:
+    """list_dir must not even reveal the name of a denied location like .env."""
+    out = list_dir(repo, ".")
+    assert ".env" not in out.content
 
 
 # --------------------------------------------------------------------------- #
