@@ -1579,6 +1579,7 @@ class StateMachine:
         # Load UIDesignState — pending first, then disk.
         from codeforge.schemas.contracts import UIDesignState
         pending_ui = self.pending.get("ui_design")
+        ui_state: UIDesignState | None
         if pending_ui is not None:
             ui_state = UIDesignState(**pending_ui)
         else:

@@ -170,7 +170,7 @@ class CommitWriter:
             # an opaque "local changes would be overwritten" error. Fail fast and actionable
             # instead, naming the offending files (untracked files don't block a merge).
             if repo.is_dirty(untracked_files=False):
-                dirty = ", ".join(sorted(d.a_path for d in repo.index.diff(None))) or "(staged changes)"
+                dirty = ", ".join(sorted(d.a_path for d in repo.index.diff(None) if d.a_path)) or "(staged changes)"
                 raise ValueError(
                     f"source repo has uncommitted local changes ({dirty}) — the canonical "
                     f"checkout must be clean between runs so the fast-forward can advance it. "

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def _is_text(path: Path) -> bool:
         return False
 
 
-def _iter_files(root: Path):
+def _iter_files(root: Path) -> Iterator[Path]:
     """Yield jailed, text-candidate files under root.
 
     search_code/find_references do not pass their results through resolve_safe the
