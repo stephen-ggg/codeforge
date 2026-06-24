@@ -54,17 +54,20 @@ def _iter_files(root: Path):
         — the exact set read_file refuses.
     """
     root = Path(root)
+    # Resolve the (constant) root once; resolve_safe reuses it per file instead of
+    # re-resolving it on every call.
+    root_resolved = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        # Prune skip dirs in place so os.walk doesn't descend into them.
+        # Prune skip dirs in place so os.walk never descends into them — which is the
+        # only guard needed (the previous per-file rel.parts re-check could never fire,
+        # since os.walk never visits a file inside a pruned dir).
         dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
         for name in sorted(filenames):
             path = Path(dirpath) / name
             rel = path.relative_to(root)
-            if any(part in _SKIP_DIRS for part in rel.parts):
-                continue
             try:
                 # Resolves symlinks and rejects escapes / denied locations (e.g. .env).
-                resolve_safe(root, rel.as_posix())
+                resolve_safe(root, rel.as_posix(), root_resolved=root_resolved)
             except JailError:
                 continue
             if not path.is_file():
@@ -144,7 +147,8 @@ def read_file(
 
 def list_dir(root: Path | str, path: str = ".") -> ToolOutput:
     """List the entries of a directory (directories suffixed with '/')."""
-    target = resolve_safe(root, path)  # raises JailError on escape/denied
+    root_resolved = Path(root).resolve()
+    target = resolve_safe(root, path, root_resolved=root_resolved)  # raises on escape/denied
     if not target.exists() or not target.is_dir():
         return ToolOutput(f"directory not found: {path}", "not found")
 
@@ -155,7 +159,7 @@ def list_dir(root: Path | str, path: str = ".") -> ToolOutput:
         try:
             # Skip denied locations (.env) and symlinks escaping the root, so the
             # listing can't even reveal the name of something read_file would refuse.
-            resolve_safe(root, str(child))
+            resolve_safe(root, str(child), root_resolved=root_resolved)
         except JailError:
             continue
         entries.append(child.name + ("/" if child.is_dir() else ""))

@@ -460,8 +460,17 @@ class StateMachine:
         project-state/, so the commit-atomicity invariant holds) so an interrupted run
         can rehydrate it on resume (see resume_run) and flush the complete project
         state at commit. Also gives crash durability for free.
+
+        The mirror (a deepcopy of the whole staging map) runs only when the map actually
+        changed since the last snapshot. The hot path — _apply_outcome on every counter
+        / gate update — never touches the staging map, so it skips the deepcopy and reuses
+        the value already on the run.
         """
-        if self._pending is not None and self._run is not None:
+        if (
+            self._pending is not None
+            and self._run is not None
+            and self._pending.consume_dirty()
+        ):
             self._run.pending_writes = self._pending.get_all_changed()
         self.event_log.update_run_snapshot(self.run)
 
@@ -2022,9 +2031,12 @@ class StateMachine:
     # ------------------------------------------------------------------
 
     def mark_failed_terminal(self) -> None:
-        # Safe to call from an error handler before a run was started (e.g. an exception
-        # during start_run/resume_run): no run means nothing to mark.
-        if self._run is None:
+        # Safe to call from an error handler before a run is fully constructed (e.g. an
+        # exception during start_run/resume_run, which assign self._run before the event
+        # log). With no run there is nothing to mark; with no event log there is nowhere
+        # to persist it — and self.event_log / _save_run_state would assert, masking the
+        # original exception with an AssertionError.
+        if self._run is None or self._event_log is None:
             return
         self.run.status = "failed_terminal"
         self._save_run_state()

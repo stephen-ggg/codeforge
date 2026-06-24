@@ -20,13 +20,20 @@ class JailError(Exception):
     """Raised when a path escapes the repo root or hits a denied location."""
 
 
-def resolve_safe(root: Path | str, rel_path: str) -> Path:
+def resolve_safe(
+    root: Path | str, rel_path: str, *, root_resolved: Path | None = None
+) -> Path:
     """Resolve rel_path against root and return it only if it is in-bounds.
+
+    root_resolved: a precomputed Path(root).resolve(). Pass it when calling in a loop
+    over many paths under the same root (e.g. directory traversal) to avoid re-resolving
+    the constant root on every call.
 
     Raises:
         JailError: the path resolves outside root or touches a denied location.
     """
-    root_resolved = Path(root).resolve()
+    if root_resolved is None:
+        root_resolved = Path(root).resolve()
 
     given = Path(rel_path)
     candidate = (

@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 _LOCK_FILE = "LOCK"
 
 
-class CodeforgeAlreadyRunningError(Exception):
+class CodeforgeLockError(Exception):
+    """Base for any failure to acquire the per-project lock (held, or unopenable)."""
+
+
+class CodeforgeAlreadyRunningError(CodeforgeLockError):
     """Raised when the lock is already held by a live process."""
 
 
@@ -47,7 +51,16 @@ class CodeforgeLock:
         succeeds because the dead process's lock was released by the OS.
         """
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        # Opening the lock file can fail for reasons unrelated to contention (a LOCK
+        # file or .codeforge dir owned by another user, a read-only mount). Surface
+        # that as a clear lock error rather than an unhandled traceback.
+        try:
+            fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError as exc:
+            raise CodeforgeLockError(
+                f"Cannot open the codeforge lock file at {self._lock_path}: {exc}. "
+                f"Check that you own the project directory and have write access."
+            ) from exc
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -58,12 +71,20 @@ class CodeforgeLock:
                 f"If you're sure it is not, delete {self._lock_path} and retry."
             )
 
-        # We hold the lock — record our identity for the diagnostic message above.
-        os.ftruncate(fd, 0)
-        stamp = f"pid={os.getpid()} started={datetime.now(timezone.utc).isoformat()}"
-        os.write(fd, stamp.encode("utf-8"))
-        os.fsync(fd)
+        # We hold the lock. Record the fd first so release() always cleans up, even if
+        # the (purely diagnostic) stamp write below fails — flock has already succeeded,
+        # so a failed stamp must not abort an otherwise-acquired lock.
         self._fd = fd
+        try:
+            os.ftruncate(fd, 0)
+            stamp = f"pid={os.getpid()} started={datetime.now(timezone.utc).isoformat()}"
+            os.write(fd, stamp.encode("utf-8"))
+            os.fsync(fd)
+        except OSError as exc:
+            logger.warning(
+                "Holding the lock but could not write its diagnostic stamp to %s: %s",
+                self._lock_path, exc,
+            )
 
     def release(self) -> None:
         """Release the lock. Safe to call if never acquired.

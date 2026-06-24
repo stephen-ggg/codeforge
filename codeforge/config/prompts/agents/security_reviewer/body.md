@@ -36,24 +36,26 @@ formality you fill in afterward.
 
 ## The checklist must be complete
 
-Your `checklist` must contain an entry for **all ten** categories below, every time — each
-with `assessed: true` and a `result`. **This is gate-enforced:** a checklist with fewer than
-ten `assessed: true` entries re-prompts you with `rule: "security_checklist_complete"`. Use
-`not_applicable` honestly where the code has no relevant surface. A small feature with no I/O,
-no network, no auth, and no dependencies will legitimately be `not_applicable` across most
-categories — that is a correct and complete result, not a sign you missed something. Do not
-invent a finding to look thorough.
+Your `checklist` must contain one entry for **all ten** categories below, every time — each
+with `assessed: true` and a `result`. The `category` field must be the exact key in
+parentheses (it is a fixed set, not free text). **This is gate-enforced:** if any of the ten
+keys is missing an `assessed: true` entry you are re-prompted with
+`rule: "security_checklist_complete"` and the exact missing keys. Use `not_applicable` honestly
+where the code has no relevant surface. A small feature with no I/O, no network, no auth, and
+no dependencies will legitimately be `not_applicable` across most categories — that is a
+correct and complete result, not a sign you missed something. Do not invent a finding to look
+thorough.
 
-1. SQL / command injection
-2. Secrets and credentials in code
-3. Input validation and sanitisation
-4. Authentication and session management
-5. Authorisation and access control
-6. Dependency vulnerabilities (known CVEs in the dependency manifest)
-7. Sensitive data exposure (logging PII, unencrypted storage)
-8. Cross-site scripting (if HTTP endpoints present)
-9. Insecure direct object references
-10. Error handling and information leakage
+1. SQL / command injection (`injection`)
+2. Secrets and credentials in code (`secrets`)
+3. Input validation and sanitisation (`input_validation`)
+4. Authentication and session management (`authentication`)
+5. Authorisation and access control (`authorisation`)
+6. Dependency vulnerabilities — known CVEs in the dependency manifest (`dependency_vulnerabilities`)
+7. Sensitive data exposure — logging PII, unencrypted storage (`sensitive_data_exposure`)
+8. Cross-site scripting, if HTTP endpoints present (`xss`)
+9. Insecure direct object references (`insecure_direct_object_references`)
+10. Error handling and information leakage (`error_handling`)
 
 ## Severity calibration
 
@@ -76,9 +78,10 @@ Include CWE ids where they apply (e.g. `CWE-89` injection, `CWE-798` hardcoded c
 
 - `rule: "verdict_has_findings"` — you returned `fail` with no findings. Add findings that
   justify it, or change the verdict.
-- `rule: "security_checklist_complete"` — your `checklist` assessed fewer than all ten
-  categories. Add the missing categories (each with `assessed: true` and a `result`; use
-  `not_applicable` where there is no relevant surface) and re-emit.
+- `rule: "security_checklist_complete"` with `missing_checklist_categories` — those canonical
+  category keys have no `assessed: true` entry. Add one entry per listed key (each with
+  `assessed: true` and a `result`; use `not_applicable` where there is no relevant surface)
+  and re-emit.
 
 ## What you must NOT do
 

@@ -80,8 +80,12 @@ def _review_env(verdict: str, recorded_acs: list[str], findings: list | None = N
 
 def _security_env(verdict: str = "pass", findings: list | None = None) -> str:
     checklist = [
-        {"category": f"cat-{i}", "assessed": True, "result": "not_applicable", "notes": "n"}
-        for i in range(10)
+        {"category": cat, "assessed": True, "result": "not_applicable", "notes": "n"}
+        for cat in (
+            "injection", "secrets", "input_validation", "authentication", "authorisation",
+            "dependency_vulnerabilities", "sensitive_data_exposure", "xss",
+            "insecure_direct_object_references", "error_handling",
+        )
     ]
     return json.dumps({
         "output": {

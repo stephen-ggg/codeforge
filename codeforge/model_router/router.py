@@ -362,14 +362,19 @@ class ModelRouter:
         thinking_chunks: list[str] = []
         text_chunks: list[str] = []
         last_chunk: Any = None
+        last_finish_reason: str | None = None
 
         for attempt in range(_MAX_ATTEMPTS):
             thinking_chunks = []
             text_chunks = []
             last_chunk = None
+            last_finish_reason = None
             try:
                 for chunk in litellm.completion(**kwargs, stream=True):
                     last_chunk = chunk
+                    fr = getattr(chunk.choices[0], "finish_reason", None)
+                    if fr is not None:
+                        last_finish_reason = fr
                     delta = chunk.choices[0].delta
                     rc = getattr(delta, "reasoning_content", None)
                     if rc:
@@ -403,16 +408,17 @@ class ModelRouter:
         thinking = "".join(thinking_chunks) or None
         text = "".join(text_chunks)
 
-        finish_reason = (
-            getattr(last_chunk.choices[0], "finish_reason", None)
-            if last_chunk is not None else None
-        )
-        # A complete stream always terminates with a recognised stop reason; anything
-        # else (missing reason from a connection cut, or "length") means the body is
-        # partial. require_complete_tail then refuses to salvage an earlier complete
-        # object (e.g. a JSON example quoted in the reasoning) as if it were the final
-        # answer — so a truncated stream fails structural validation and is routed
-        # through the truncation path instead of masquerading as a clean envelope.
+        # A genuinely complete stream settles on a recognised stop reason on some chunk.
+        # A provider may then emit a trailing usage-only chunk whose finish_reason is
+        # None, so we key off the last NON-None reason seen across the stream rather than
+        # only the final chunk's — otherwise a complete response gets misread as truncated.
+        # A real connection cut never delivers a stop reason (stays None) and "length" is
+        # an explicit cut, so both correctly fall through to truncated. require_complete_tail
+        # then refuses to salvage an earlier complete object (e.g. a JSON example quoted in
+        # the reasoning) as the final answer, so a truncated stream fails structural
+        # validation and is routed through the truncation path instead of masquerading as a
+        # clean envelope.
+        finish_reason = last_finish_reason
         truncated = finish_reason not in _COMPLETE_FINISH_REASONS
         json_text = self._extract_json(text, require_complete_tail=truncated)
 
@@ -710,8 +716,17 @@ class ModelRouter:
                 start = s.find("{", start + 1)
                 continue
             # When the response was truncated, only an object that ends the text can be
-            # the genuine final answer; reject anything with trailing content.
-            eligible = not require_complete_tail or not s[end:].strip()
+            # the genuine final answer; reject anything with trailing content. A bare
+            # closing code fence is the exception — models commonly wrap the final
+            # envelope in ```json … ``` without the opening fence at position 0 (so the
+            # leading-fence strip above misses it), leaving a trailing ``` that is
+            # formatting, not a sign the object was quoted mid-reasoning.
+            tail = s[end:]
+            eligible = (
+                not require_complete_tail
+                or not tail.strip()
+                or re.fullmatch(r"\s*```\s*", tail) is not None
+            )
             if isinstance(obj, dict) and eligible:
                 segment = s[start:end]
                 last_object = segment

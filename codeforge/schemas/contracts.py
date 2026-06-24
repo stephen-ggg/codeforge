@@ -731,8 +731,27 @@ CodeReviewerOutput = AgentOutput[ReviewReport]
 # 2.5 Security Reviewer
 # ---------------------------------------------------------------------------
 
+# The ten fixed security-review categories. Canonical keys (not free text) so the
+# security_checklist_complete gate can assert the checklist covers exactly this set by
+# identity rather than counting distinct free-form phrases (which a model can game with
+# ten rephrasings of one category). The security_reviewer prompt maps each numbered
+# category to its key; keep the two in sync.
+SecurityChecklistCategory = Literal[
+    "injection",                          # 1. SQL / command injection
+    "secrets",                            # 2. Secrets and credentials in code
+    "input_validation",                   # 3. Input validation and sanitisation
+    "authentication",                     # 4. Authentication and session management
+    "authorisation",                      # 5. Authorisation and access control
+    "dependency_vulnerabilities",         # 6. Dependency vulnerabilities (known CVEs)
+    "sensitive_data_exposure",            # 7. Sensitive data exposure (PII, unencrypted)
+    "xss",                                # 8. Cross-site scripting
+    "insecure_direct_object_references",  # 9. Insecure direct object references
+    "error_handling",                     # 10. Error handling and information leakage
+]
+
+
 class SecurityChecklistItem(BaseModel):
-    category: str
+    category: SecurityChecklistCategory
     assessed: bool
     result: Literal["clean", "finding_raised", "not_applicable"]
     notes: str

@@ -17,6 +17,8 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
+from typing import get_args
+
 from codeforge.schemas.contracts import (
     AgentId,
     AgentOutput,
@@ -27,6 +29,7 @@ from codeforge.schemas.contracts import (
     RetryCounters,
     ValidationError,
     ReviewReport,
+    SecurityChecklistCategory,
     SecurityReport,
     TestAnalysis,
     CodeArtifact,
@@ -37,9 +40,10 @@ from codeforge.schemas.contracts import (
 )
 
 
-# The security reviewer must assess all ten checklist categories every run
+# The security reviewer must assess all ten canonical checklist categories every run
 # (see config/prompts/agents/security_reviewer/body.md — "The checklist must be complete").
-_SECURITY_CHECKLIST_CATEGORY_COUNT = 10
+# Derived from the contract Literal so the gate and the schema can't drift apart.
+_SECURITY_CHECKLIST_CATEGORIES: frozenset[str] = frozenset(get_args(SecurityChecklistCategory))
 
 
 class OutputValidator:
@@ -220,31 +224,24 @@ class OutputValidator:
                     counter="malformed_output",
                 )
 
-            # security_checklist_complete: the checklist must assess all ten categories
-            # every run (the prompt mandates this). A short or partly-unassessed checklist
-            # means the review skipped categories — enforce completeness, not just findings.
-            # Count DISTINCT assessed categories (normalised): the category field is a
-            # free-form natural-language phrase, so exact-name matching against the prompt's
-            # ten descriptive labels would brittly re-prompt on harmless rephrasing. Counting
-            # distinct entries still closes the gaming hole the raw count left open — ten
-            # duplicates of one category ("injection" ×10) no longer satisfy the gate.
-            distinct_assessed = {
-                " ".join(c.category.lower().split())
-                for c in payload.checklist
-                if c.assessed and c.category.strip()
-            }
-            if len(distinct_assessed) < _SECURITY_CHECKLIST_CATEGORY_COUNT:
+            # security_checklist_complete: the checklist must assess all ten canonical
+            # categories every run (the prompt mandates this). category is a fixed Literal
+            # (SecurityChecklistCategory), so we check the assessed set covers the canonical
+            # set by IDENTITY — not by counting entries. That closes the gaming hole a raw
+            # or distinct count left open (ten rephrasings of one category) and, because the
+            # missing set is exact, the re-prompt always names the precise categories to add,
+            # whether the failure was an omission or duplicate-but-incomplete coverage.
+            assessed_categories = {c.category for c in payload.checklist if c.assessed}
+            missing_categories = _SECURITY_CHECKLIST_CATEGORIES - assessed_categories
+            if missing_categories:
                 return False, self._make_violation(
                     rule="security_checklist_complete",
                     detail=(
                         f"security checklist must assess all "
-                        f"{_SECURITY_CHECKLIST_CATEGORY_COUNT} distinct categories with "
-                        f"assessed=true; got {len(distinct_assessed)} distinct assessed of "
-                        f"{len(payload.checklist)} entries"
+                        f"{len(_SECURITY_CHECKLIST_CATEGORIES)} canonical categories with "
+                        f"assessed=true; missing: {sorted(missing_categories)}"
                     ),
-                    missing_checklist_categories=[
-                        c.category for c in payload.checklist if not c.assessed
-                    ],
+                    missing_checklist_categories=sorted(missing_categories),
                     attempt_number=attempt_number,
                     original_input_ref=original_input_ref,
                     counter="malformed_output",

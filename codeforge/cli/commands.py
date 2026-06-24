@@ -29,7 +29,7 @@ class RunMode(str, Enum):
     continuation = "continuation"
 
 from codeforge.cli.interaction import HumanInteraction, reentry_options_for
-from codeforge.cli.lock import CodeforgeAlreadyRunningError, CodeforgeLock
+from codeforge.cli.lock import CodeforgeLock, CodeforgeLockError
 from codeforge.config.config_loader import load_config
 from codeforge.orchestrator.state_machine import (
     ConfigChangedError,
@@ -478,7 +478,7 @@ def run(
 
     try:
         lock.acquire()
-    except CodeforgeAlreadyRunningError as exc:
+    except CodeforgeLockError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 
@@ -590,7 +590,7 @@ def resume(
 
     try:
         lock.acquire()
-    except CodeforgeAlreadyRunningError as exc:
+    except CodeforgeLockError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1)
 

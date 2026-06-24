@@ -60,10 +60,15 @@ class PendingWrites:
         # The on-disk store — used as fallback for merge_append
         self._store = project_state
         self._map: dict[str, dict[str, Any]] = {}
+        # Set whenever the staging map changes; consumed by the orchestrator before a run
+        # snapshot so it only deep-copies/mirrors the map when there is something new to
+        # persist (counter-only snapshots skip the copy entirely).
+        self._dirty = False
 
     def set(self, document: ProjectStateDocument, data: dict[str, Any]) -> None:
         """Stage a full document write. Overwrites any prior pending write for this document."""
         self._map[document] = copy.deepcopy(data)
+        self._dirty = True
 
     def get(self, document: ProjectStateDocument) -> dict[str, Any] | None:
         """
@@ -87,10 +92,22 @@ class PendingWrites:
         project state at commit. Mirrors the shape returned by get_all_changed().
         """
         self._map = copy.deepcopy(data)
+        # The run already carries this exact map (it is where we restored from), so no
+        # immediate re-sync is needed; leave the dirty flag untouched.
 
     def has(self, document: ProjectStateDocument) -> bool:
         """Return True if document has a pending write this run."""
         return document in self._map
+
+    def consume_dirty(self) -> bool:
+        """Return whether the staging map changed since the last call, then reset.
+
+        Lets the orchestrator skip the get_all_changed() deepcopy on snapshots that
+        didn't touch the staging map (the common counter/gate-update hot path).
+        """
+        was_dirty = self._dirty
+        self._dirty = False
+        return was_dirty
 
     def merge_append(
         self,
@@ -130,3 +147,4 @@ class PendingWrites:
 
         merged = {**current, "entries": existing_entries + appended}
         self._map[document] = merged
+        self._dirty = True
