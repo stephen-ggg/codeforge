@@ -184,11 +184,13 @@ def test_inject_stack_guidance_lands_fragment_in_context() -> None:
     # The fragment text the profile returns must reach the agent's user turn under the
     # _stack_guidance key. Verified without constructing a full StateMachine.
     from types import SimpleNamespace
+    from typing import cast
 
     from codeforge.orchestrator.state_machine import StateMachine
 
     profile = SimpleNamespace(prompt_fragment=lambda key: f"GUIDANCE::{key}")
-    fake_self = SimpleNamespace(_config=SimpleNamespace(stack_profile=profile))
+    # Duck-typed stand-in: only the attributes _inject_stack_guidance touches.
+    fake_self = cast(StateMachine, SimpleNamespace(_config=SimpleNamespace(stack_profile=profile)))
     pkg = SimpleNamespace(state_documents={})
 
     StateMachine._inject_stack_guidance(fake_self, pkg, "coder")
